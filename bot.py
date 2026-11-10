@@ -275,11 +275,11 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
         required=True,
     )
     action_input = discord.ui.TextInput(
-        label="Type 1 for Channel Reset | Type 2 for Dibs Only",
-        placeholder="1 = Full Channel Reset | 2 = Clear Dibs Only",
+        label="Type 1 (Full Reset) or 2 (Dibs Only)",
+        placeholder="1 = Channel | 2 = Dibs",
         default="1",
         min_length=1,
-        max_length=10,
+        max_length=5,
         required=True,
     )
 
@@ -585,7 +585,6 @@ async def on_ready():
     await update_tracker_message()
 
 
-# Command to post the channel claim embed in Discord
 @bot.command(name="b2test")
 @commands.has_permissions(manage_messages=True)
 async def setup_b2(ctx):
