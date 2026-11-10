@@ -118,7 +118,7 @@ def build_embed():
             if queue_list:
                 next_user = queue_list[0]
                 queue_str = f" ➡️ *Dibs: <@{next_user}>*"
-                
+
             entry = f"**Ch {ch}:** {holder} — expires <t:{info['end_time']}:R>{queue_str}"
         else:
             if ch in channel_data:
@@ -177,29 +177,30 @@ class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
         self.ch_num = ch_num
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
             mins = int(self.minutes_input.value)
             if mins < 1 or mins > DEFAULT_MINUTES:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ Please enter a number between **1** and **{DEFAULT_MINUTES}**.",
                     ephemeral=True,
                 )
                 return
         except ValueError:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Please enter a valid number.", ephemeral=True
             )
             return
 
         async with data_lock:
             if self.ch_num not in channel_data:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ **Ch {self.ch_num}** is no longer claimed.", ephemeral=True
                 )
                 return
             channel_data[self.ch_num]["end_time"] = int(time.time()) + (mins * 60)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Updated **Ch {self.ch_num}** timer to **{mins} minutes**.",
             ephemeral=True,
         )
@@ -216,16 +217,17 @@ class ClaimDibsModal(discord.ui.Modal, title="Claim Dibs on a Channel"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
             ch = int(self.ch_input.value)
             if ch < 1 or ch > TOTAL_CHANNELS:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ Enter a valid channel between **1** and **{TOTAL_CHANNELS}**.",
                     ephemeral=True,
                 )
                 return
         except ValueError:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Please enter a valid number.", ephemeral=True
             )
             return
@@ -234,14 +236,14 @@ class ClaimDibsModal(discord.ui.Modal, title="Claim Dibs on a Channel"):
         async with data_lock:
             info = channel_data.get(ch)
             if not info or info["end_time"] <= now:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"ℹ️ **Ch {ch}** is currently open! You can claim it directly using the channel button.",
                     ephemeral=True,
                 )
                 return
 
             if info["user_id"] == interaction.user.id:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ You already own **Ch {ch}**!", ephemeral=True
                 )
                 return
@@ -250,21 +252,21 @@ class ClaimDibsModal(discord.ui.Modal, title="Claim Dibs on a Channel"):
                 info["queue"] = []
 
             if interaction.user.id in info["queue"]:
-                await interaction.response.send_message(
-                    f"ℹ️ You already have dibs placed on **Ch {ch}**. Use **Cancel My Dibs** if you wish to remove it.", ephemeral=True
+                await interaction.followup.send(
+                    f"ℹ️ You already have dibs placed on **Ch {ch}**. Use **Cancel My Dibs** to remove it.", ephemeral=True
                 )
                 return
 
             info["queue"].append(interaction.user.id)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"🙋 You claimed dibs on **Ch {ch}**! You are next in line.",
             ephemeral=True,
         )
         await update_tracker_message()
 
 
-class HelperClearModal(discord.ui.Modal, title="Helper Clear Channel / Dibs"):
+class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
     ch_input = discord.ui.TextInput(
         label=f"Channel Number (1 to {TOTAL_CHANNELS})",
         placeholder="e.g., 14",
@@ -273,45 +275,52 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Channel / Dibs"):
         required=True,
     )
     action_input = discord.ui.TextInput(
-        label="Type 'all' to reset channel, or 'dibs' to clear dibs",
-        placeholder="all / dibs",
-        default="all",
-        min_length=3,
-        max_length=4,
+        label="Type 1 for Channel Reset | Type 2 for Dibs Only",
+        placeholder="1 = Full Channel Reset | 2 = Clear Dibs Only",
+        default="1",
+        min_length=1,
+        max_length=10,
         required=True,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
             ch = int(self.ch_input.value)
-            action = self.action_input.value.strip().lower()
+            val = self.action_input.value.strip().lower()
             if ch < 1 or ch > TOTAL_CHANNELS:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ Enter a valid channel between **1** and **{TOTAL_CHANNELS}**.",
                     ephemeral=True,
                 )
                 return
         except ValueError:
-            await interaction.response.send_message(
-                "❌ Please enter a valid number.", ephemeral=True
+            await interaction.followup.send(
+                "❌ Please enter a valid channel number.", ephemeral=True
             )
             return
 
         async with data_lock:
             if ch not in channel_data:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"ℹ️ **Ch {ch}** is already open.", ephemeral=True
                 )
                 return
 
-            if action == "dibs":
+            if val in ["2", "dibs", "dib"]:
                 channel_data[ch]["queue"] = []
-                msg = f"🛡️ Cleared all dibs for **Ch {ch}**."
-            else:
+                msg = f"🛡️ Cleared all dibs for **Ch {ch}**. Active holder preserved."
+            elif val in ["1", "channel", "chan", "all"]:
                 del channel_data[ch]
-                msg = f"🛡️ Completely reset **Ch {ch}**."
+                msg = f"🛡️ Completely reset **Ch {ch}** back to open."
+            else:
+                await interaction.followup.send(
+                    "❌ Invalid choice! Enter **1** for Full Reset or **2** for Dibs Only.",
+                    ephemeral=True,
+                )
+                return
 
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
         await update_tracker_message()
 
 
@@ -576,6 +585,7 @@ async def on_ready():
     await update_tracker_message()
 
 
+# Command to post the channel claim embed in Discord
 @bot.command(name="b2test")
 @commands.has_permissions(manage_messages=True)
 async def setup_b2(ctx):
