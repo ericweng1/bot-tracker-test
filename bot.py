@@ -98,8 +98,8 @@ def build_embed():
     embed = discord.Embed(
         title="🚇 B2 Subway Line — Jr. Wraith Channel Tracker",
         description=(
-            "Use the **Dropdown** to switch channel pages (**1–15**, **16–30**,"
-            " **31–40**).\n"
+            "Use the **Dropdown** to switch channel pages (**1–10**, **11–20**,"
+            " **21–30**, **31–40**).\n"
             "🟢 = Member Claimed | 🔴 = Non-Member Timer | ❓ = Unknown\n"
             "Click a **Channel Button** to claim it as a member, or use **Log Non-Member**!"
         ),
@@ -339,9 +339,10 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
 class ChannelPageSelect(discord.ui.Select):
     def __init__(self, page_num: int):
         options = [
-            discord.SelectOption(label="Channels 1 – 15", value="1", default=(page_num == 1)),
-            discord.SelectOption(label="Channels 16 – 30", value="2", default=(page_num == 2)),
-            discord.SelectOption(label="Channels 31 – 40", value="3", default=(page_num == 3)),
+            discord.SelectOption(label="Channels 1 – 10", value="1", default=(page_num == 1)),
+            discord.SelectOption(label="Channels 11 – 20", value="2", default=(page_num == 2)),
+            discord.SelectOption(label="Channels 21 – 30", value="3", default=(page_num == 3)),
+            discord.SelectOption(label="Channels 31 – 40", value="4", default=(page_num == 4)),
         ]
         super().__init__(placeholder="Select Channel Group...", min_values=1, max_values=1, options=options, row=0)
 
@@ -397,7 +398,7 @@ class ChannelButton(discord.ui.Button):
 
 class ClaimDibsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🙋 Claim Dibs", style=discord.ButtonStyle.success, custom_id="claim_dibs_btn", row=4)
+        super().__init__(label="🙋 Claim Dibs", style=discord.ButtonStyle.success, custom_id="claim_dibs_btn", row=3)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ClaimDibsModal())
@@ -405,7 +406,7 @@ class ClaimDibsButton(discord.ui.Button):
 
 class CancelDibsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="❌ Cancel Dibs", style=discord.ButtonStyle.secondary, custom_id="cancel_my_dibs", row=4)
+        super().__init__(label="❌ Cancel Dibs", style=discord.ButtonStyle.secondary, custom_id="cancel_my_dibs", row=3)
 
     async def callback(self, interaction: discord.Interaction):
         removed = []
@@ -430,7 +431,7 @@ class CancelDibsButton(discord.ui.Button):
 
 class EditTimerButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="⏱️ Edit Timer", style=discord.ButtonStyle.primary, custom_id="edit_my_timer", row=4)
+        super().__init__(label="⏱️ Edit Timer", style=discord.ButtonStyle.primary, custom_id="edit_my_timer", row=3)
 
     async def callback(self, interaction: discord.Interaction):
         now = int(time.time())
@@ -446,7 +447,7 @@ class EditTimerButton(discord.ui.Button):
 
 class LogNonMemberButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🔴 Log Non-Member", style=discord.ButtonStyle.secondary, custom_id="log_non_member_btn", row=4)
+        super().__init__(label="🔴 Log Non-Member", style=discord.ButtonStyle.secondary, custom_id="log_non_member_btn", row=3)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(NonMemberTimerModal())
@@ -454,7 +455,7 @@ class LogNonMemberButton(discord.ui.Button):
 
 class LeaveChannelButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🚪 Leave Channel", style=discord.ButtonStyle.danger, custom_id="leave_my_channel", row=5)
+        super().__init__(label="🚪 Leave Channel", style=discord.ButtonStyle.danger, custom_id="leave_my_channel", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         async with data_lock:
@@ -478,7 +479,7 @@ class LeaveChannelButton(discord.ui.Button):
 
 class HelperClearButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🛡️ Helper Clear", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=5)
+        super().__init__(label="🛡️ Helper Clear", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         if not is_helper(interaction.user):
@@ -493,13 +494,15 @@ class TrackerView(discord.ui.View):
         now = int(time.time())
         self.add_item(ChannelPageSelect(page))
 
-        start_ch = (page - 1) * 15 + 1
-        end_ch = min(page * 15, TOTAL_CHANNELS)
+        # 10 channels per page across 4 pages
+        start_ch = (page - 1) * 10 + 1
+        end_ch = min(page * 10, TOTAL_CHANNELS)
         for idx, ch in enumerate(range(start_ch, end_ch + 1)):
-            row_num = 1 + (idx // 5)
+            row_num = 1 + (idx // 5)  # Channels take rows 1 and 2
             is_taken = bool(channel_data.get(ch, {}).get("end_time", 0) > now)
             self.add_item(ChannelButton(ch, is_taken, row_num))
 
+        # Action buttons safely distributed across rows 3 and 4
         self.add_item(ClaimDibsButton())
         self.add_item(CancelDibsButton())
         self.add_item(EditTimerButton())
