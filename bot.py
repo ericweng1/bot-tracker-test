@@ -344,7 +344,7 @@ class ChannelPageSelect(discord.ui.Select):
             discord.SelectOption(label="Channels 21 – 30", value="3", default=(page_num == 3)),
             discord.SelectOption(label="Channels 31 – 40", value="4", default=(page_num == 4)),
         ]
-        super().__init__(placeholder="Select Channel Group...", min_values=1, max_values=1, options=options, row=0)
+        super().__init__(placeholder="Select Channel Group...", min_values=1, max_values=1, options=options, custom_id="channel_page_select", row=0)
 
     async def callback(self, interaction: discord.Interaction):
         global current_page
@@ -358,6 +358,7 @@ class ChannelButton(discord.ui.Button):
         super().__init__(
             label=f"Ch {ch_num}",
             style=discord.ButtonStyle.secondary if is_taken else discord.ButtonStyle.success,
+            custom_id=f"claim_ch_{ch_num}",
             row=row_num
         )
         self.ch_num = ch_num
@@ -494,15 +495,13 @@ class TrackerView(discord.ui.View):
         now = int(time.time())
         self.add_item(ChannelPageSelect(page))
 
-        # 10 channels per page across 4 pages
         start_ch = (page - 1) * 10 + 1
         end_ch = min(page * 10, TOTAL_CHANNELS)
         for idx, ch in enumerate(range(start_ch, end_ch + 1)):
-            row_num = 1 + (idx // 5)  # Channels take rows 1 and 2
+            row_num = 1 + (idx // 5)
             is_taken = bool(channel_data.get(ch, {}).get("end_time", 0) > now)
             self.add_item(ChannelButton(ch, is_taken, row_num))
 
-        # Action buttons safely distributed across rows 3 and 4
         self.add_item(ClaimDibsButton())
         self.add_item(CancelDibsButton())
         self.add_item(EditTimerButton())
@@ -534,7 +533,7 @@ async def on_ready():
     await update_tracker_message()
 
 
-@bot.command(name="b2test")
+@bot.command(name="b2test)
 @commands.has_permissions(manage_messages=True)
 async def setup_b2(ctx):
     await ctx.message.delete()
