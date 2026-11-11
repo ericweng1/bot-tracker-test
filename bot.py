@@ -306,7 +306,6 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
             await interaction.followup.send("❌ Enter valid numbers.", ephemeral=True)
             return
 
-        # Get name or default to "Non-Member" if left blank
         nm_name = self.name_input.value.strip()
         if not nm_name:
             nm_name = "Non-Member"
@@ -577,6 +576,47 @@ async def clear_all(ctx):
         channel_data.clear()
     await update_tracker_message()
     await ctx.send("🛡️ All channels reset to unknown.", delete_after=5)
+
+
+# --- NEW ADMIN / HELPER COMMAND TO MANUALLY ADD MEMBER TIMERS ---
+@bot.command(name="add_member")
+@commands.has_permissions(manage_messages=True)
+async def add_member(ctx, ch: int, minutes: int, member: discord.Member):
+    if not is_helper(ctx.author):
+        try:
+            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", delete_after=5)
+        except discord.HTTPException:
+            pass
+        return
+
+    await ctx.message.delete()
+
+    if ch < 1 or ch > TOTAL_CHANNELS or minutes < 1:
+        try:
+            await ctx.send("❌ Invalid channel number or minutes.", delete_after=5)
+        except discord.HTTPException:
+            pass
+        return
+
+    now = int(time.time())
+    async with data_lock:
+        # Release any other channel this member currently holds
+        for c, info in list(channel_data.items()):
+            if info.get("type") == "member" and info["user_id"] == member.id:
+                del channel_data[c]
+
+        channel_data[ch] = {
+            "type": "member",
+            "user_id": member.id,
+            "end_time": now + (minutes * 60),
+            "queue": [],
+        }
+
+    await update_tracker_message()
+    try:
+        await ctx.send(f"🛡️ Manually assigned **Ch {ch}** to {member.mention} for **{minutes}m**.", delete_after=5)
+    except discord.HTTPException:
+        pass
 
 
 if __name__ == "__main__":
