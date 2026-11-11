@@ -118,8 +118,9 @@ def build_embed():
                 queue_str = f" ➡️ *Dibs: <@{queue_list[0]}>*" if queue_list else ""
                 entry = f"**Ch {ch}:** 🟢 {holder} — expires <t:{info['end_time']}:R>{queue_str}"
             else:
+                name_label = info.get("name", "Non-Member")
                 reporter = f"<@{info['user_id']}>"
-                entry = f"**Ch {ch}:** 🔴 Non-Member — expires <t:{info['end_time']}:R> *(reported by {reporter})*"
+                entry = f"**Ch {ch}:** 🔴 {name_label} — expires <t:{info['end_time']}:R> *(reported by {reporter})*"
         else:
             if ch in channel_data:
                 del channel_data[ch]
@@ -219,7 +220,6 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
         await interaction.response.defer(ephemeral=True)
         val = self.input_field.value.strip().lower()
 
-        # Handle cancellation option
         if val in ["cancel", "c", "remove"]:
             removed = []
             async with data_lock:
@@ -237,7 +237,6 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
                 await interaction.followup.send("ℹ️ You have no active dibs to cancel.", ephemeral=True)
             return
 
-        # Handle claiming dibs for a channel number
         try:
             ch = int(val)
             if ch < 1 or ch > TOTAL_CHANNELS:
@@ -287,6 +286,13 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
         max_length=3,
         required=True,
     )
+    name_input = discord.ui.TextInput(
+        label="Non-Member Name (Optional)",
+        placeholder="Defaults to Non-Member if blank",
+        min_length=0,
+        max_length=25,
+        required=False,
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -300,14 +306,20 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
             await interaction.followup.send("❌ Enter valid numbers.", ephemeral=True)
             return
 
+        # Get name or default to "Non-Member" if left blank
+        nm_name = self.name_input.value.strip()
+        if not nm_name:
+            nm_name = "Non-Member"
+
         async with data_lock:
             channel_data[ch] = {
                 "type": "non_member",
+                "name": nm_name,
                 "user_id": interaction.user.id,
                 "end_time": int(time.time()) + (mins * 60)
             }
 
-        msg = await interaction.followup.send(f"🔴 <@{interaction.user.id}> logged non-member timer for **Ch {ch}** (**{mins}m**).", wait=True)
+        msg = await interaction.followup.send(f"🔴 <@{interaction.user.id}> logged **{nm_name}** timer for **Ch {ch}** (**{mins}m**).", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
         await update_tracker_message()
 
@@ -498,7 +510,6 @@ class TrackerView(discord.ui.View):
             is_taken = bool(channel_data.get(ch, {}).get("end_time", 0) > now)
             self.add_item(ChannelButton(ch, is_taken, row_num))
 
-        # Action buttons safely fitting within Discord's 5-item-per-row limit (Row 3 has 3 buttons, Row 4 has 2 buttons)
         self.add_item(CombinedDibsButton())
         self.add_item(EditTimerButton())
         self.add_item(LogNonMemberButton())
