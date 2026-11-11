@@ -12,8 +12,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TOTAL_CHANNELS = 40
 DEFAULT_MINUTES = 98
 HELPER_ROLE_NAME = "B2 Helper"
-DATA_FILE = "b2_channels.json"
-AUTO_DELETE_SECONDS = 5  # Time before public notification messages self-destruct
+DATA_FILE = "b2_unified_data.json"
+AUTO_DELETE_SECONDS = 5
 # ---------------------
 
 # --- KEEP-ALIVE WEB SERVER ---
@@ -21,7 +21,7 @@ app = Flask("")
 
 @app.route("/")
 def home():
-    return "B2 Subway Tracker Bot is online!"
+    return "B2 Subway Unified Tracker Bot is online!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -37,6 +37,10 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Unified data structure: 
+# channel_data[ch] = {"type": "member", "user_id": ..., "end_time": ..., "queue": [...]}
+# OR
+# channel_data[ch] = {"type": "non_member", "user_id": ..., "end_time": ...}
 channel_data = {}
 tracker_message_info = {"channel_id": None, "message_id": None}
 current_page = 1
@@ -50,7 +54,6 @@ def is_helper(member: discord.Member) -> bool:
 
 
 def save_data_sync():
-    """Synchronous save – never call this directly from the event loop."""
     try:
         with open(DATA_FILE, "w") as f:
             json.dump(
@@ -66,7 +69,6 @@ def save_data_sync():
 
 
 async def save_data():
-    """Non-blocking save."""
     await asyncio.to_thread(save_data_sync)
 
 
@@ -101,8 +103,9 @@ def build_embed():
         title="🚇 B2 Subway Line — Jr. Wraith Channel Tracker",
         description=(
             "Use the **Dropdown** to switch channel pages (**1–15**, **16–30**,"
-            " **31–40**).\nClick a **Channel Button** to claim it for"
-            f" **{format_duration(DEFAULT_MINUTES)}**, or use **Claim Dibs** to queue next!"
+            " **31–40**).\n"
+            "🟢 = Member Claimed | 🔴 = Non-Member Timer | ❓ = Unknown\n"
+            "Click a **Channel Button** to claim it as a member, or use **Log Non-Member**!"
         ),
         color=discord.Color.purple(),
     )
@@ -113,18 +116,18 @@ def build_embed():
     for ch in range(1, TOTAL_CHANNELS + 1):
         info = channel_data.get(ch)
         if info and info["end_time"] > now:
-            holder = f"<@{info['user_id']}>"
-            queue_list = info.get("queue", [])
-            queue_str = ""
-            if queue_list:
-                next_user = queue_list[0]
-                queue_str = f" ➡️ *Dibs: <@{next_user}>*"
-
-            entry = f"**Ch {ch}:** {holder} — expires <t:{info['end_time']}:R>{queue_str}"
+            if info["type"] == "member":
+                holder = f"<@{info['user_id']}>"
+                queue_list = info.get("queue", [])
+                queue_str = f" ➡️ *Dibs: <@{queue_list[0]}>*" if queue_list else ""
+                entry = f"**Ch {ch}:** 🟢 {holder} — expires <t:{info['end_time']}:R>{queue_str}"
+            else:  # non_member
+                reporter = f"<@{info['user_id']}>"
+                entry = f"**Ch {ch}:** 🔴 Non-Member — expires <t:{info['end_time']}:R> *(reported by {reporter})*"
         else:
             if ch in channel_data:
                 del channel_data[ch]
-            entry = f"**Ch {ch}:** 🟢 *Open*"
+            entry = f"**Ch {ch}:** ❓ *Unknown*"
 
         if ch <= 20:
             lines_left.append(entry)
@@ -160,18 +163,17 @@ async def update_tracker_message():
         tracker_message_info["channel_id"] = None
         tracker_message_info["message_id"] = None
         await save_data()
-    except discord.HTTPException as e:
-        print(f"[update_tracker] HTTPException: {e}")
 
 
 async def auto_delete_msg(msg):
-    """Utility to safely delete a message after AUTO_DELETE_SECONDS delay."""
     try:
         await asyncio.sleep(AUTO_DELETE_SECONDS)
         await msg.delete()
-    except (discord.NotFound, discord.HTTPException, AttributeError):
+    except Exception:
         pass
 
+
+# --- MODALS ---
 
 class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
     minutes_input = discord.ui.TextInput(
@@ -191,36 +193,26 @@ class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
         try:
             mins = int(self.minutes_input.value)
             if mins < 1 or mins > DEFAULT_MINUTES:
-                await interaction.followup.send(
-                    f"❌ Please enter a number between **1** and **{DEFAULT_MINUTES}**.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send(f"❌ Enter between 1 and {DEFAULT_MINUTES}.", ephemeral=True)
                 return
         except ValueError:
-            await interaction.followup.send(
-                "❌ Please enter a valid number.", ephemeral=True
-            )
+            await interaction.followup.send("❌ Enter a valid number.", ephemeral=True)
             return
 
         async with data_lock:
             if self.ch_num not in channel_data:
-                await interaction.followup.send(
-                    f"❌ **Ch {self.ch_num}** is no longer claimed.", ephemeral=True
-                )
+                await interaction.followup.send("❌ Channel no longer active.", ephemeral=True)
                 return
             channel_data[self.ch_num]["end_time"] = int(time.time()) + (mins * 60)
 
-        msg = await interaction.followup.send(
-            f"⏱️ <@{interaction.user.id}> updated **Ch {self.ch_num}** timer to **{mins} mins**.",
-            wait=True,
-        )
+        msg = await interaction.followup.send(f"⏱️ <@{interaction.user.id}> updated **Ch {self.ch_num}** to **{mins}m**.", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
         await update_tracker_message()
 
 
 class ClaimDibsModal(discord.ui.Modal, title="Claim Dibs on a Channel"):
     ch_input = discord.ui.TextInput(
-        label=f"Channel Number to Queue For (1 to {TOTAL_CHANNELS})",
+        label=f"Channel Number (1 to {TOTAL_CHANNELS})",
         placeholder="e.g., 14",
         min_length=1,
         max_length=2,
@@ -232,49 +224,73 @@ class ClaimDibsModal(discord.ui.Modal, title="Claim Dibs on a Channel"):
         try:
             ch = int(self.ch_input.value)
             if ch < 1 or ch > TOTAL_CHANNELS:
-                await interaction.followup.send(
-                    f"❌ Enter a valid channel between **1** and **{TOTAL_CHANNELS}**.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
                 return
         except ValueError:
-            await interaction.followup.send(
-                "❌ Please enter a valid number.", ephemeral=True
-            )
+            await interaction.followup.send("❌ Enter a valid number.", ephemeral=True)
             return
 
         now = int(time.time())
         async with data_lock:
             info = channel_data.get(ch)
-            if not info or info["end_time"] <= now:
-                await interaction.followup.send(
-                    f"ℹ️ **Ch {ch}** is currently open! You can claim it directly using the channel button.",
-                    ephemeral=True,
-                )
+            if not info or info["end_time"] <= now or info["type"] == "non_member":
+                await interaction.followup.send("ℹ️ Channel is unknown or non-member! Claim it directly.", ephemeral=True)
                 return
 
             if info["user_id"] == interaction.user.id:
-                await interaction.followup.send(
-                    f"❌ You already own **Ch {ch}**!", ephemeral=True
-                )
+                await interaction.followup.send("❌ You already own this channel!", ephemeral=True)
                 return
 
             if "queue" not in info:
                 info["queue"] = []
 
             if interaction.user.id in info["queue"]:
-                await interaction.followup.send(
-                    f"ℹ️ You already have dibs placed on **Ch {ch}**. Use **Cancel My Dibs** to remove it.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send("ℹ️ You already have dibs here.", ephemeral=True)
                 return
 
             info["queue"].append(interaction.user.id)
 
-        msg = await interaction.followup.send(
-            f"🙋 <@{interaction.user.id}> claimed dibs on **Ch {ch}**! They are next in line.",
-            wait=True,
-        )
+        msg = await interaction.followup.send(f"🙋 <@{interaction.user.id}> claimed dibs on **Ch {ch}**!", wait=True)
+        asyncio.create_task(auto_delete_msg(msg))
+        await update_tracker_message()
+
+
+class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
+    ch_input = discord.ui.TextInput(
+        label=f"Channel Number (1 to {TOTAL_CHANNELS})",
+        placeholder="e.g., 14",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+    mins_input = discord.ui.TextInput(
+        label="Minutes Remaining",
+        placeholder="e.g., 30",
+        min_length=1,
+        max_length=3,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            ch = int(self.ch_input.value)
+            mins = int(self.mins_input.value)
+            if ch < 1 or ch > TOTAL_CHANNELS or mins < 1:
+                await interaction.followup.send("❌ Invalid channel or minutes.", ephemeral=True)
+                return
+        except ValueError:
+            await interaction.followup.send("❌ Enter valid numbers.", ephemeral=True)
+            return
+
+        async with data_lock:
+            channel_data[ch] = {
+                "type": "non_member",
+                "user_id": interaction.user.id,
+                "end_time": int(time.time()) + (mins * 60)
+            }
+
+        msg = await interaction.followup.send(f"🔴 <@{interaction.user.id}> logged non-member timer for **Ch {ch}** (**{mins}m**).", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
         await update_tracker_message()
 
@@ -302,148 +318,91 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
             ch = int(self.ch_input.value)
             val = self.action_input.value.strip().lower()
             if ch < 1 or ch > TOTAL_CHANNELS:
-                await interaction.followup.send(
-                    f"❌ Enter a valid channel between **1** and **{TOTAL_CHANNELS}**.",
-                    ephemeral=True,
-                )
                 return
         except ValueError:
-            await interaction.followup.send(
-                "❌ Please enter a valid channel number.", ephemeral=True
-            )
             return
 
         async with data_lock:
             if ch not in channel_data:
-                await interaction.followup.send(
-                    f"ℹ️ **Ch {ch}** is already open.", ephemeral=True
-                )
+                await interaction.followup.send("ℹ️ Channel already unknown.", ephemeral=True)
                 return
-
-            if val in ["2", "dibs", "dib"]:
+            if val in ["2", "dibs", "dib"] and channel_data[ch].get("type") == "member":
                 channel_data[ch]["queue"] = []
-                msg_text = f"🛡️ Cleared all dibs for **Ch {ch}**."
-            elif val in ["1", "channel", "chan", "all"]:
-                del channel_data[ch]
-                msg_text = f"🛡️ Completely reset **Ch {ch}** back to open."
+                msg_text = f"🛡️ Cleared dibs for **Ch {ch}**."
             else:
-                await interaction.followup.send(
-                    "❌ Invalid choice! Enter **1** for Full Reset or **2** for Dibs Only.",
-                    ephemeral=True,
-                )
-                return
+                del channel_data[ch]
+                msg_text = f"🛡️ Reset **Ch {ch}** to unknown."
 
         msg = await interaction.followup.send(msg_text, wait=True)
         asyncio.create_task(auto_delete_msg(msg))
         await update_tracker_message()
 
 
+# --- VIEWS & BUTTONS ---
+
 class ChannelPageSelect(discord.ui.Select):
-    def __init__(self, current_page_num: int):
+    def __init__(self, page_num: int):
         options = [
-            discord.SelectOption(
-                label="Channels 1 – 15",
-                value="1",
-                description="Show claim buttons for Ch 1 through Ch 15",
-                default=(current_page_num == 1),
-            ),
-            discord.SelectOption(
-                label="Channels 16 – 30",
-                value="2",
-                description="Show claim buttons for Ch 16 through Ch 30",
-                default=(current_page_num == 2),
-            ),
-            discord.SelectOption(
-                label="Channels 31 – 40",
-                value="3",
-                description="Show claim buttons for Ch 31 through Ch 40",
-                default=(current_page_num == 3),
-            ),
+            discord.SelectOption(label="Channels 1 – 15", value="1", default=(page_num == 1)),
+            discord.SelectOption(label="Channels 16 – 30", value="2", default=(page_num == 2)),
+            discord.SelectOption(label="Channels 31 – 40", value="3", default=(page_num == 3)),
         ]
-        super().__init__(
-            placeholder="Select Channel Group...",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="channel_page_select",
-            row=0,
-        )
+        super().__init__(placeholder="Select Channel Group...", min_values=1, max_values=1, options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         global current_page
         current_page = int(self.values[0])
-        await interaction.response.edit_message(
-            embed=build_embed(), view=TrackerView(page=current_page)
-        )
+        await interaction.response.edit_message(embed=build_embed(), view=TrackerView(page=current_page))
         await save_data()
 
 
 class ChannelButton(discord.ui.Button):
     def __init__(self, ch_num: int, is_taken: bool, row_num: int):
-        style = (
-            discord.ButtonStyle.secondary
-            if is_taken
-            else discord.ButtonStyle.success
-        )
         super().__init__(
             label=f"Ch {ch_num}",
-            style=style,
-            custom_id=f"claim_ch_{ch_num}",
-            row=row_num,
+            style=discord.ButtonStyle.secondary if is_taken else discord.ButtonStyle.success,
+            row=row_num
         )
         self.ch_num = ch_num
 
     async def callback(self, interaction: discord.Interaction):
         now = int(time.time())
-
         async with data_lock:
             current = channel_data.get(self.ch_num)
             if current and current["end_time"] > now:
-                if current["user_id"] != interaction.user.id:
-                    await interaction.response.send_message(
-                        f"⚠️ **Ch {self.ch_num}** is currently claimed by"
-                        f" <@{current['user_id']}>. Use **Claim Dibs** to get next in line!",
-                        ephemeral=True,
-                    )
+                if current["type"] == "member" and current["user_id"] != interaction.user.id:
+                    await interaction.response.send_message(f"⚠️ Ch {self.ch_num} is claimed. Use Dibs!", ephemeral=True)
                     return
-                else:
-                    await interaction.response.send_message(
-                        f"ℹ️ You already hold **Ch {self.ch_num}**. Use **Edit Timer** to"
-                        " adjust your time.",
-                        ephemeral=True,
-                    )
+                elif current["type"] == "non_member":
+                    # Overriding non-member with member claim
+                    pass
+                elif current["type"] == "member" and current["user_id"] == interaction.user.id:
+                    await interaction.response.send_message(f"ℹ️ You already hold Ch {self.ch_num}.", ephemeral=True)
                     return
 
             for ch, info in list(channel_data.items()):
-                if info["user_id"] == interaction.user.id:
+                if info.get("type") == "member" and info["user_id"] == interaction.user.id:
                     del channel_data[ch]
 
             channel_data[self.ch_num] = {
+                "type": "member",
                 "user_id": interaction.user.id,
                 "end_time": now + (DEFAULT_MINUTES * 60),
                 "queue": [],
             }
 
-        await interaction.response.send_message(
-            f"🚇 <@{interaction.user.id}> claimed **Ch {self.ch_num}** for **{format_duration(DEFAULT_MINUTES)}**!"
-        )
+        await interaction.response.send_message(f"🚇 <@{interaction.user.id}> claimed **Ch {self.ch_num}** for **{format_duration(DEFAULT_MINUTES)}**!")
         try:
             msg = await interaction.original_response()
             asyncio.create_task(auto_delete_msg(msg))
         except Exception:
             pass
-
         await update_tracker_message()
 
 
 class ClaimDibsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="🙋 Claim Dibs",
-            style=discord.ButtonStyle.success,
-            custom_id="claim_dibs_btn",
-            row=4,
-        )
+        super().__init__(label="🙋 Claim Dibs", style=discord.ButtonStyle.success, custom_id="claim_dibs_btn", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ClaimDibsModal())
@@ -451,119 +410,84 @@ class ClaimDibsButton(discord.ui.Button):
 
 class CancelDibsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="❌ Cancel My Dibs",
-            style=discord.ButtonStyle.secondary,
-            custom_id="cancel_my_dibs",
-            row=4,
-        )
+        super().__init__(label="❌ Cancel My Dibs", style=discord.ButtonStyle.secondary, custom_id="cancel_my_dibs", row=4)
 
     async def callback(self, interaction: discord.Interaction):
-        removed_channels = []
+        removed = []
         async with data_lock:
             for ch, info in channel_data.items():
-                if "queue" in info and interaction.user.id in info["queue"]:
+                if info.get("type") == "member" and "queue" in info and interaction.user.id in info["queue"]:
                     info["queue"].remove(interaction.user.id)
-                    removed_channels.append(ch)
+                    removed.append(ch)
 
-        if removed_channels:
-            ch_list = ", ".join([f"**Ch {ch}**" for ch in removed_channels])
-            await interaction.response.send_message(
-                f"✅ Removed <@{interaction.user.id}>'s dibs from {ch_list}."
-            )
+        if removed:
+            ch_list = ", ".join([f"**Ch {ch}**" for ch in removed])
+            await interaction.response.send_message(f"✅ Removed dibs from {ch_list}.")
             try:
                 msg = await interaction.original_response()
                 asyncio.create_task(auto_delete_msg(msg))
             except Exception:
                 pass
-
             await update_tracker_message()
         else:
-            await interaction.response.send_message(
-                "ℹ️ You don't have active dibs placed on any channel.", ephemeral=True
-            )
+            await interaction.response.send_message("ℹ️ You have no active dibs.", ephemeral=True)
 
 
 class EditTimerButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="⏱️ Edit My Timer",
-            style=discord.ButtonStyle.primary,
-            custom_id="edit_my_timer",
-            row=4,
-        )
+        super().__init__(label="⏱️ Edit Timer", style=discord.ButtonStyle.primary, custom_id="edit_my_timer", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         now = int(time.time())
         user_ch = next(
-            (
-                ch
-                for ch, info in channel_data.items()
-                if info["user_id"] == interaction.user.id and info["end_time"] > now
-            ),
-            None,
+            (ch for ch, info in channel_data.items() if info.get("type") == "member" and info["user_id"] == interaction.user.id and info["end_time"] > now),
+            None
         )
         if not user_ch:
-            await interaction.response.send_message(
-                "❌ You don't currently have a channel claimed!", ephemeral=True
-            )
+            await interaction.response.send_message("❌ You don't have an active member channel claimed!", ephemeral=True)
             return
         await interaction.response.send_modal(EditTimerModal(user_ch))
 
 
+class LogNonMemberButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="🔴 Log Non-Member", style=discord.ButtonStyle.secondary, custom_id="log_non_member_btn", row=4)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(NonMemberTimerModal())
+
+
 class LeaveChannelButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="🚪 Leave Channel",
-            style=discord.ButtonStyle.danger,
-            custom_id="leave_my_channel",
-            row=4,
-        )
+        super().__init__(label="🚪 Leave Channel", style=discord.ButtonStyle.danger, custom_id="leave_my_channel", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         async with data_lock:
             user_ch = next(
-                (
-                    ch
-                    for ch, info in channel_data.items()
-                    if info["user_id"] == interaction.user.id
-                ),
-                None,
+                (ch for ch, info in channel_data.items() if info.get("type") == "member" and info["user_id"] == interaction.user.id),
+                None
             )
             if not user_ch:
-                await interaction.response.send_message(
-                    "❌ You don't have a channel claimed.", ephemeral=True
-                )
+                await interaction.response.send_message("❌ You don't have a member channel claimed.", ephemeral=True)
                 return
             del channel_data[user_ch]
 
-        await interaction.response.send_message(
-            f"🚪 <@{interaction.user.id}> released **Ch {user_ch}**."
-        )
+        await interaction.response.send_message(f"🚪 <@{interaction.user.id}> released **Ch {user_ch}**.")
         try:
             msg = await interaction.original_response()
             asyncio.create_task(auto_delete_msg(msg))
         except Exception:
             pass
-
         await update_tracker_message()
 
 
 class HelperClearButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(
-            label="🛡️ Helper Clear",
-            style=discord.ButtonStyle.secondary,
-            custom_id="helper_clear_btn",
-            row=4,
-        )
+        super().__init__(label="🛡️ Helper Clear", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         if not is_helper(interaction.user):
-            await interaction.response.send_message(
-                f"❌ Only users with the **{HELPER_ROLE_NAME}** role can use this.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this.", ephemeral=True)
             return
         await interaction.response.send_modal(HelperClearModal())
 
@@ -576,16 +500,15 @@ class TrackerView(discord.ui.View):
 
         start_ch = (page - 1) * 15 + 1
         end_ch = min(page * 15, TOTAL_CHANNELS)
-
         for idx, ch in enumerate(range(start_ch, end_ch + 1)):
             row_num = 1 + (idx // 5)
-            info = channel_data.get(ch)
-            is_taken = bool(info and info["end_time"] > now)
+            is_taken = bool(channel_data.get(ch, {}).get("end_time", 0) > now)
             self.add_item(ChannelButton(ch, is_taken, row_num))
 
         self.add_item(ClaimDibsButton())
         self.add_item(CancelDibsButton())
         self.add_item(EditTimerButton())
+        self.add_item(LogNonMemberButton())
         self.add_item(LeaveChannelButton())
         self.add_item(HelperClearButton())
 
@@ -595,9 +518,7 @@ async def cleanup_expired():
     now = int(time.time())
     expired = []
     async with data_lock:
-        expired = [
-            ch for ch, info in channel_data.items() if info["end_time"] <= now
-        ]
+        expired = [ch for ch, info in channel_data.items() if info["end_time"] <= now]
         for ch in expired:
             del channel_data[ch]
 
@@ -611,7 +532,7 @@ async def on_ready():
     bot.add_view(TrackerView(page=current_page))
     if not cleanup_expired.is_running():
         cleanup_expired.start()
-    print(f"Logged in as {bot.user}!")
+    print(f"Unified Bot logged in as {bot.user}!")
     await update_tracker_message()
 
 
@@ -619,18 +540,6 @@ async def on_ready():
 @commands.has_permissions(manage_messages=True)
 async def setup_b2(ctx):
     await ctx.message.delete()
-
-    old_ch_id = tracker_message_info.get("channel_id")
-    old_msg_id = tracker_message_info.get("message_id")
-    if old_ch_id and old_msg_id:
-        old_channel = bot.get_channel(old_ch_id)
-        if old_channel:
-            try:
-                old_msg = await old_channel.fetch_message(old_msg_id)
-                await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
     msg = await ctx.send(embed=build_embed(), view=TrackerView(page=1))
     tracker_message_info["channel_id"] = msg.channel.id
     tracker_message_info["message_id"] = msg.id
@@ -644,24 +553,15 @@ async def clear_ch(ctx, ch: int):
     if not is_helper(ctx.author):
         return
     await ctx.message.delete()
-
-    cleared = False
     async with data_lock:
-        if ch in channel_data:
+        existed = ch in channel_data
+        if existed:
             del channel_data[ch]
-            cleared = True
-
-    if cleared:
+    if existed:
         await update_tracker_message()
-        try:
-            await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
-        except discord.HTTPException:
-            pass
+        msg = await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
     else:
-        try:
-            await ctx.send(f"ℹ️ **Ch {ch}** is already open.", delete_after=5)
-        except discord.HTTPException:
-            pass
+        msg = await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
 
 
 @bot.command()
@@ -669,15 +569,10 @@ async def clear_all(ctx):
     if not is_helper(ctx.author):
         return
     await ctx.message.delete()
-
     async with data_lock:
         channel_data.clear()
-
     await update_tracker_message()
-    try:
-        await ctx.send("🛡️ All channels cleared.", delete_after=5)
-    except discord.HTTPException:
-        pass
+    await ctx.send("🛡️ All channels reset to unknown.", delete_after=5)
 
 
 if __name__ == "__main__":
