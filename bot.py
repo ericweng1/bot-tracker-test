@@ -533,7 +533,7 @@ async def on_ready():
     await update_tracker_message()
 
 
-@bot.command(name="b2test)
+@bot.command(name="b2test")
 @commands.has_permissions(manage_messages=True)
 async def setup_b2(ctx):
     await ctx.message.delete()
