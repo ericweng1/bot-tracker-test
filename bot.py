@@ -37,10 +37,6 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Unified data structure: 
-# channel_data[ch] = {"type": "member", "user_id": ..., "end_time": ..., "queue": [...]}
-# OR
-# channel_data[ch] = {"type": "non_member", "user_id": ..., "end_time": ...}
 channel_data = {}
 tracker_message_info = {"channel_id": None, "message_id": None}
 current_page = 1
@@ -121,7 +117,7 @@ def build_embed():
                 queue_list = info.get("queue", [])
                 queue_str = f" ➡️ *Dibs: <@{queue_list[0]}>*" if queue_list else ""
                 entry = f"**Ch {ch}:** 🟢 {holder} — expires <t:{info['end_time']}:R>{queue_str}"
-            else:  # non_member
+            else:
                 reporter = f"<@{info['user_id']}>"
                 entry = f"**Ch {ch}:** 🔴 Non-Member — expires <t:{info['end_time']}:R> *(reported by {reporter})*"
         else:
@@ -374,7 +370,6 @@ class ChannelButton(discord.ui.Button):
                     await interaction.response.send_message(f"⚠️ Ch {self.ch_num} is claimed. Use Dibs!", ephemeral=True)
                     return
                 elif current["type"] == "non_member":
-                    # Overriding non-member with member claim
                     pass
                 elif current["type"] == "member" and current["user_id"] == interaction.user.id:
                     await interaction.response.send_message(f"ℹ️ You already hold Ch {self.ch_num}.", ephemeral=True)
@@ -410,7 +405,7 @@ class ClaimDibsButton(discord.ui.Button):
 
 class CancelDibsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="❌ Cancel My Dibs", style=discord.ButtonStyle.secondary, custom_id="cancel_my_dibs", row=4)
+        super().__init__(label="❌ Cancel Dibs", style=discord.ButtonStyle.secondary, custom_id="cancel_my_dibs", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         removed = []
@@ -459,7 +454,7 @@ class LogNonMemberButton(discord.ui.Button):
 
 class LeaveChannelButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🚪 Leave Channel", style=discord.ButtonStyle.danger, custom_id="leave_my_channel", row=4)
+        super().__init__(label="🚪 Leave Channel", style=discord.ButtonStyle.danger, custom_id="leave_my_channel", row=5)
 
     async def callback(self, interaction: discord.Interaction):
         async with data_lock:
@@ -483,7 +478,7 @@ class LeaveChannelButton(discord.ui.Button):
 
 class HelperClearButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🛡️ Helper Clear", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=4)
+        super().__init__(label="🛡️ Helper Clear", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=5)
 
     async def callback(self, interaction: discord.Interaction):
         if not is_helper(interaction.user):
@@ -559,9 +554,9 @@ async def clear_ch(ctx, ch: int):
             del channel_data[ch]
     if existed:
         await update_tracker_message()
-        msg = await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
+        await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
     else:
-        msg = await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
+        await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
 
 
 @bot.command()
