@@ -170,7 +170,55 @@ async def auto_delete_msg(msg):
         pass
 
 
-# --- MODALS ---
+# --- VIEWS & MODALS ---
+
+class DibsApprovalView(discord.ui.View):
+    def __init__(self, ch_num: int, owner_id: int, requester_id: int):
+        super().__init__(timeout=60)
+        self.ch_num = ch_num
+        self.owner_id = owner_id
+        self.requester_id = requester_id
+
+    @discord.ui.button(label="✅ Accept Dibs", style=discord.ButtonStyle.success)
+    async def accept_dibs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Only the current channel owner can approve dibs.", ephemeral=True)
+            return
+
+        now = int(time.time())
+        async with data_lock:
+            info = channel_data.get(self.ch_num)
+            if not info or info.get("end_time", 0) <= now or info.get("user_id") != self.owner_id:
+                await interaction.response.edit_message(content="❌ This channel is no longer active or yours.", view=None)
+                return
+
+            if "queue" not in info:
+                info["queue"] = []
+
+            if self.requester_id in info["queue"]:
+                await interaction.response.edit_message(content=f"ℹ️ <@{self.requester_id}> is already in the dibs queue for **Ch {self.ch_num}**.", view=None)
+                return
+
+            info["queue"].append(self.requester_id)
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=f"✅ Approved dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", view=self)
+        await update_tracker_message()
+
+    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
+    async def decline_dibs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Only the current channel owner can decline dibs.", ephemeral=True)
+            return
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=f"❌ Declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", view=self)
+
+    async def on_timeout(self):
+        pass
+
 
 class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
     minutes_input = discord.ui.TextInput(
@@ -247,6 +295,7 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
             return
 
         now = int(time.time())
+        owner_id = None
         async with data_lock:
             info = channel_data.get(ch)
             if not info or info["end_time"] <= now or info["type"] == "non_member":
@@ -257,14 +306,37 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
                 await interaction.followup.send("❌ You already own this channel!", ephemeral=True)
                 return
 
-            if "queue" not in info:
-                info["queue"] = []
-
-            if interaction.user.id in info["queue"]:
+            if "queue" in info and interaction.user.id in info["queue"]:
                 await interaction.followup.send("ℹ️ You already have dibs here.", ephemeral=True)
                 return
 
-            info["queue"].append(interaction.user.id)
+            owner_id = info["user_id"]
+
+        owner = bot.get_user(owner_id)
+        if not owner:
+            try:
+                owner = await bot.fetch_user(owner_id)
+            except Exception:
+                pass
+
+        if owner:
+            try:
+                view = DibsApprovalView(ch, owner_id, interaction.user.id)
+                await owner.send(
+                    f"🔔 **<@{interaction.user.id}>** wants to place dibs on your channel (**Ch {ch}**). Do you accept?",
+                    view=view
+                )
+                await interaction.followup.send(f"⏳ Sent a request to <@{owner_id}> to approve your dibs on **Ch {ch}**.", ephemeral=True)
+                return
+            except Exception:
+                pass
+
+        async with data_lock:
+            info = channel_data.get(ch)
+            if info:
+                if "queue" not in info:
+                    info["queue"] = []
+                info["queue"].append(interaction.user.id)
 
         msg = await interaction.followup.send(f"🙋 <@{interaction.user.id}> claimed dibs on **Ch {ch}**!", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
@@ -466,6 +538,10 @@ class LeaveChannelButton(discord.ui.Button):
         super().__init__(label="🚪 Leave Channel", style=discord.ButtonStyle.danger, custom_id="leave_my_channel", row=4)
 
     async def callback(self, interaction: discord.Interaction):
+        now = int(time.time())
+        released_ch = None
+        next_user_id = None
+
         async with data_lock:
             user_ch = next(
                 (ch for ch, info in channel_data.items() if info.get("type") == "member" and info["user_id"] == interaction.user.id),
@@ -474,9 +550,27 @@ class LeaveChannelButton(discord.ui.Button):
             if not user_ch:
                 await interaction.response.send_message("❌ You don't have a member channel claimed.", ephemeral=True)
                 return
-            del channel_data[user_ch]
 
-        await interaction.response.send_message(f"🚪 <@{interaction.user.id}> released **Ch {user_ch}**.")
+            released_ch = user_ch
+            info = channel_data[released_ch]
+            queue_list = info.get("queue", [])
+
+            if queue_list:
+                next_user_id = queue_list.pop(0)
+                channel_data[released_ch] = {
+                    "type": "member",
+                    "user_id": next_user_id,
+                    "end_time": now + (DEFAULT_MINUTES * 60),
+                    "queue": queue_list,
+                }
+            else:
+                del channel_data[released_ch]
+
+        if next_user_id:
+            await interaction.response.send_message(f"🚪 <@{interaction.user.id}> released **Ch {released_ch}** ➡️ Automatically claimed by <@{next_user_id}> for **{format_duration(DEFAULT_MINUTES)}**!")
+        else:
+            await interaction.response.send_message(f"🚪 <@{interaction.user.id}> released **Ch {released_ch}**.")
+
         try:
             msg = await interaction.original_response()
             asyncio.create_task(auto_delete_msg(msg))
@@ -519,13 +613,25 @@ class TrackerView(discord.ui.View):
 @tasks.loop(seconds=45)
 async def cleanup_expired():
     now = int(time.time())
-    expired = []
+    updated = False
     async with data_lock:
-        expired = [ch for ch, info in channel_data.items() if info["end_time"] <= now]
-        for ch in expired:
-            del channel_data[ch]
+        for ch, info in list(channel_data.items()):
+            if info["end_time"] <= now:
+                queue_list = info.get("queue", [])
+                if queue_list and info.get("type") == "member":
+                    next_user_id = queue_list.pop(0)
+                    channel_data[ch] = {
+                        "type": "member",
+                        "user_id": next_user_id,
+                        "end_time": now + (DEFAULT_MINUTES * 60),
+                        "queue": queue_list,
+                    }
+                    updated = True
+                else:
+                    del channel_data[ch]
+                    updated = True
 
-    if expired:
+    if updated:
         await update_tracker_message()
 
 
@@ -540,9 +646,28 @@ async def on_ready():
 
 
 @bot.command(name="b2test")
-@commands.has_permissions(manage_messages=True)
 async def setup_b2(ctx):
+    if not is_helper(ctx.author):
+        try:
+            await ctx.message.delete()
+            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", delete_after=5)
+        except discord.HTTPException:
+            pass
+        return
+
     await ctx.message.delete()
+
+    old_ch_id = tracker_message_info.get("channel_id")
+    old_msg_id = tracker_message_info.get("message_id")
+    if old_ch_id and old_msg_id:
+        old_channel = bot.get_channel(old_ch_id)
+        if old_channel:
+            try:
+                old_msg = await old_channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
     msg = await ctx.send(embed=build_embed(), view=TrackerView(page=1))
     tracker_message_info["channel_id"] = msg.channel.id
     tracker_message_info["message_id"] = msg.id
@@ -578,12 +703,11 @@ async def clear_all(ctx):
     await ctx.send("🛡️ All channels reset to unknown.", delete_after=5)
 
 
-# --- NEW ADMIN / HELPER COMMAND TO MANUALLY ADD MEMBER TIMERS ---
 @bot.command(name="add_member")
-@commands.has_permissions(manage_messages=True)
 async def add_member(ctx, ch: int, minutes: int, member: discord.Member):
     if not is_helper(ctx.author):
         try:
+            await ctx.message.delete()
             await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", delete_after=5)
         except discord.HTTPException:
             pass
@@ -600,7 +724,6 @@ async def add_member(ctx, ch: int, minutes: int, member: discord.Member):
 
     now = int(time.time())
     async with data_lock:
-        # Release any other channel this member currently holds
         for c, info in list(channel_data.items()):
             if info.get("type") == "member" and info["user_id"] == member.id:
                 del channel_data[c]
