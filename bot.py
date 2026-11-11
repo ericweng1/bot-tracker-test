@@ -100,7 +100,7 @@ def build_embed():
         description=(
             "Use the **Dropdown** to switch channel pages (**1–10**, **11–20**,"
             " **21–30**, **31–40**).\n"
-            "🟢 = Member Claimed | 🔴 = Non-Member Timer | ❓ = Unknown\n"
+            "🟢 = Member Claimed | 🔴 = Non-Member Timer | 🟠 = Unknown\n"
             "Click a **Channel Button** to claim it as a member, or use **Log Non-Member**!"
         ),
         color=discord.Color.purple(),
@@ -123,7 +123,7 @@ def build_embed():
         else:
             if ch in channel_data:
                 del channel_data[ch]
-            entry = f"**Ch {ch}:** ❓ *Unknown*"
+            entry = f"**Ch {ch}:** 🟠 *Unknown*"
 
         if ch <= 20:
             lines_left.append(entry)
@@ -206,24 +206,45 @@ class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
         await update_tracker_message()
 
 
-class ClaimDibsModal(discord.ui.Modal, title="Claim Dibs on a Channel"):
-    ch_input = discord.ui.TextInput(
-        label=f"Channel Number (1 to {TOTAL_CHANNELS})",
-        placeholder="e.g., 14",
+class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
+    input_field = discord.ui.TextInput(
+        label="Channel # (to claim) OR type 'cancel'",
+        placeholder="e.g., 14 or cancel",
         min_length=1,
-        max_length=2,
+        max_length=6,
         required=True,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        val = self.input_field.value.strip().lower()
+
+        # Handle cancellation option
+        if val in ["cancel", "c", "remove"]:
+            removed = []
+            async with data_lock:
+                for ch, info in channel_data.items():
+                    if info.get("type") == "member" and "queue" in info and interaction.user.id in info["queue"]:
+                        info["queue"].remove(interaction.user.id)
+                        removed.append(ch)
+
+            if removed:
+                ch_list = ", ".join([f"**Ch {ch}**" for ch in removed])
+                msg = await interaction.followup.send(f"✅ Removed your dibs from {ch_list}.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
+                await update_tracker_message()
+            else:
+                await interaction.followup.send("ℹ️ You have no active dibs to cancel.", ephemeral=True)
+            return
+
+        # Handle claiming dibs for a channel number
         try:
-            ch = int(self.ch_input.value)
+            ch = int(val)
             if ch < 1 or ch > TOTAL_CHANNELS:
                 await interaction.followup.send(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
                 return
         except ValueError:
-            await interaction.followup.send("❌ Enter a valid number.", ephemeral=True)
+            await interaction.followup.send("❌ Enter a valid channel number or 'cancel'.", ephemeral=True)
             return
 
         now = int(time.time())
@@ -397,37 +418,12 @@ class ChannelButton(discord.ui.Button):
         await update_tracker_message()
 
 
-class ClaimDibsButton(discord.ui.Button):
+class CombinedDibsButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🙋 Claim Dibs", style=discord.ButtonStyle.success, custom_id="claim_dibs_btn", row=3)
+        super().__init__(label="🙋 Dibs (Claim/Cancel)", style=discord.ButtonStyle.success, custom_id="combined_dibs_btn", row=3)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ClaimDibsModal())
-
-
-class CancelDibsButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="❌ Cancel Dibs", style=discord.ButtonStyle.secondary, custom_id="cancel_my_dibs", row=3)
-
-    async def callback(self, interaction: discord.Interaction):
-        removed = []
-        async with data_lock:
-            for ch, info in channel_data.items():
-                if info.get("type") == "member" and "queue" in info and interaction.user.id in info["queue"]:
-                    info["queue"].remove(interaction.user.id)
-                    removed.append(ch)
-
-        if removed:
-            ch_list = ", ".join([f"**Ch {ch}**" for ch in removed])
-            await interaction.response.send_message(f"✅ Removed dibs from {ch_list}.")
-            try:
-                msg = await interaction.original_response()
-                asyncio.create_task(auto_delete_msg(msg))
-            except Exception:
-                pass
-            await update_tracker_message()
-        else:
-            await interaction.response.send_message("ℹ️ You have no active dibs.", ephemeral=True)
+        await interaction.response.send_modal(CombinedDibsModal())
 
 
 class EditTimerButton(discord.ui.Button):
@@ -502,8 +498,8 @@ class TrackerView(discord.ui.View):
             is_taken = bool(channel_data.get(ch, {}).get("end_time", 0) > now)
             self.add_item(ChannelButton(ch, is_taken, row_num))
 
-        self.add_item(ClaimDibsButton())
-        self.add_item(CancelDibsButton())
+        # Action buttons safely fitting within Discord's 5-item-per-row limit (Row 3 has 3 buttons, Row 4 has 2 buttons)
+        self.add_item(CombinedDibsButton())
         self.add_item(EditTimerButton())
         self.add_item(LogNonMemberButton())
         self.add_item(LeaveChannelButton())
