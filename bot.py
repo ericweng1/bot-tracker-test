@@ -372,7 +372,7 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
         view.message = msg
 
 
-class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
+class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"):
     ch_input = discord.ui.TextInput(
         label=f"Channel Number (1 to {TOTAL_CHANNELS})",
         placeholder="e.g., 14",
@@ -381,10 +381,10 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
         required=True,
     )
     mins_input = discord.ui.TextInput(
-        label="Minutes Remaining",
-        placeholder="e.g., 30",
+        label="Minutes OR type 'clear'",
+        placeholder="e.g., 30 or clear",
         min_length=1,
-        max_length=3,
+        max_length=5,
         required=True,
     )
     name_input = discord.ui.TextInput(
@@ -399,24 +399,57 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
         await interaction.response.defer(ephemeral=True)
         try:
             ch = int(self.ch_input.value)
-            mins = int(self.mins_input.value)
-            if ch < 1 or ch > TOTAL_CHANNELS or mins < 1:
-                await interaction.followup.send("❌ Invalid channel or minutes.", ephemeral=True)
+            if ch < 1 or ch > TOTAL_CHANNELS:
+                await interaction.followup.send(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
                 return
         except ValueError:
-            await interaction.followup.send("❌ Enter valid numbers.", ephemeral=True)
+            await interaction.followup.send("❌ Enter a valid channel number.", ephemeral=True)
+            return
+
+        mins_val = self.mins_input.value.strip().lower()
+        if mins_val in ["clear", "c", "remove", "delete"]:
+            async with data_lock:
+                current = channel_data.get(ch)
+                if current and current.get("type") == "non_member":
+                    del channel_data[ch]
+                    cleared = True
+                else:
+                    cleared = False
+
+            if cleared:
+                msg = await interaction.followup.send(f"🧹 Cleared non-member timer for **Ch {ch}**.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
+                await update_tracker_message()
+            else:
+                msg = await interaction.followup.send(f"ℹ️ **Ch {ch}** does not have an active non-member timer.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
+            return
+
+        try:
+            mins = int(mins_val)
+            if mins < 1:
+                await interaction.followup.send("❌ Minutes must be at least 1.", ephemeral=True)
+                return
+        except ValueError:
+            await interaction.followup.send("❌ Enter valid minutes or 'clear'.", ephemeral=True)
             return
 
         nm_name = self.name_input.value.strip()
         if not nm_name:
             nm_name = "Non-Member"
 
+        now = int(time.time())
         async with data_lock:
+            current = channel_data.get(ch)
+            if current and current["end_time"] > now and current.get("type") == "member":
+                await interaction.followup.send(f"❌ Cannot log non-member timer: **Ch {ch}** currently has an active member claim!", ephemeral=True)
+                return
+
             channel_data[ch] = {
                 "type": "non_member",
                 "name": nm_name,
                 "user_id": interaction.user.id,
-                "end_time": int(time.time()) + (mins * 60)
+                "end_time": now + (mins * 60)
             }
 
         msg = await interaction.followup.send(f"🔴 <@{interaction.user.id}> logged **{nm_name}** timer for **Ch {ch}** (**{mins}m**).", wait=True)
