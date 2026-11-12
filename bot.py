@@ -179,7 +179,7 @@ class DibsApprovalView(discord.ui.View):
         self.owner_id = owner_id
         self.requester_id = requester_id
 
-    @discord.ui.button(label="✅ Accept Dibs", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success)
     async def accept_dibs(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("❌ Only the current channel owner can approve dibs.", ephemeral=True)
@@ -192,6 +192,8 @@ class DibsApprovalView(discord.ui.View):
                 await interaction.response.edit_message(content="❌ This channel is no longer active or yours.", view=None)
                 return
 
+            info.pop("pending_dib", None)
+
             if "queue" not in info:
                 info["queue"] = []
 
@@ -203,7 +205,7 @@ class DibsApprovalView(discord.ui.View):
 
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(content=f"✅ Approved dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", view=self)
+        await interaction.response.edit_message(content=f"✅ <@{self.owner_id}> accepted dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", view=self)
         await update_tracker_message()
 
     @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
@@ -212,12 +214,20 @@ class DibsApprovalView(discord.ui.View):
             await interaction.response.send_message("❌ Only the current channel owner can decline dibs.", ephemeral=True)
             return
 
+        async with data_lock:
+            info = channel_data.get(self.ch_num)
+            if info:
+                info.pop("pending_dib", None)
+
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(content=f"❌ Declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", view=self)
+        await interaction.response.edit_message(content=f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", view=self)
 
     async def on_timeout(self):
-        pass
+        async with data_lock:
+            info = channel_data.get(self.ch_num)
+            if info:
+                info.pop("pending_dib", None)
 
 
 class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
@@ -265,10 +275,10 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
         val = self.input_field.value.strip().lower()
 
         if val in ["cancel", "c", "remove"]:
+            await interaction.response.defer(ephemeral=True)
             removed = []
             async with data_lock:
                 for ch, info in channel_data.items():
@@ -288,10 +298,10 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
         try:
             ch = int(val)
             if ch < 1 or ch > TOTAL_CHANNELS:
-                await interaction.followup.send(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
+                await interaction.response.send_message(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
                 return
         except ValueError:
-            await interaction.followup.send("❌ Enter a valid channel number or 'cancel'.", ephemeral=True)
+            await interaction.response.send_message("❌ Enter a valid channel number or 'cancel'.", ephemeral=True)
             return
 
         now = int(time.time())
@@ -299,48 +309,31 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
         async with data_lock:
             info = channel_data.get(ch)
             if not info or info["end_time"] <= now or info["type"] == "non_member":
-                await interaction.followup.send("ℹ️ Channel is unknown or non-member! Claim it directly.", ephemeral=True)
+                await interaction.response.send_message("ℹ️ Channel is unknown or non-member! Claim it directly.", ephemeral=True)
                 return
 
             if info["user_id"] == interaction.user.id:
-                await interaction.followup.send("❌ You already own this channel!", ephemeral=True)
+                await interaction.response.send_message("❌ You already own this channel!", ephemeral=True)
                 return
 
             if "queue" in info and interaction.user.id in info["queue"]:
-                await interaction.followup.send("ℹ️ You already have dibs here.", ephemeral=True)
+                await interaction.response.send_message("ℹ️ You already have dibs here.", ephemeral=True)
                 return
 
+            if info.get("pending_dib"):
+                await interaction.response.send_message("⚠️ There is already a pending dibs request for this channel. Please wait until it is processed.", ephemeral=True)
+                return
+
+            info["pending_dib"] = interaction.user.id
             owner_id = info["user_id"]
 
-        owner = bot.get_user(owner_id)
-        if not owner:
-            try:
-                owner = await bot.fetch_user(owner_id)
-            except Exception:
-                pass
+        await interaction.response.send_message(f"⏳ Sent a dibs request to <@{owner_id}> for **Ch {ch}**.", ephemeral=True)
 
-        if owner:
-            try:
-                view = DibsApprovalView(ch, owner_id, interaction.user.id)
-                await owner.send(
-                    f"🔔 **<@{interaction.user.id}>** wants to place dibs on your channel (**Ch {ch}**). Do you accept?",
-                    view=view
-                )
-                await interaction.followup.send(f"⏳ Sent a request to <@{owner_id}> to approve your dibs on **Ch {ch}**.", ephemeral=True)
-                return
-            except Exception:
-                pass
-
-        async with data_lock:
-            info = channel_data.get(ch)
-            if info:
-                if "queue" not in info:
-                    info["queue"] = []
-                info["queue"].append(interaction.user.id)
-
-        msg = await interaction.followup.send(f"🙋 <@{interaction.user.id}> claimed dibs on **Ch {ch}**!", wait=True)
-        asyncio.create_task(auto_delete_msg(msg))
-        await update_tracker_message()
+        view = DibsApprovalView(ch, owner_id, interaction.user.id)
+        await interaction.channel.send(
+            f"🔔 <@{owner_id}>, <@{interaction.user.id}> is requesting dibs for **Ch {ch}**. Do you accept or decline?",
+            view=view
+        )
 
 
 class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
@@ -428,6 +421,7 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
                 return
             if val in ["2", "dibs", "dib"] and channel_data[ch].get("type") == "member":
                 channel_data[ch]["queue"] = []
+                channel_data[ch].pop("pending_dib", None)
                 msg_text = f"🛡️ Cleared dibs for **Ch {ch}**."
             else:
                 del channel_data[ch]
