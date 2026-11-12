@@ -178,6 +178,19 @@ class DibsApprovalView(discord.ui.View):
         self.ch_num = ch_num
         self.owner_id = owner_id
         self.requester_id = requester_id
+        self.message = None
+
+    async def on_timeout(self):
+        async with data_lock:
+            info = channel_data.get(self.ch_num)
+            if info:
+                info.pop("pending_dib", None)
+        
+        if self.message:
+            try:
+                await self.message.delete()
+            except Exception:
+                pass
 
     @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success)
     async def accept_dibs(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -238,12 +251,6 @@ class DibsApprovalView(discord.ui.View):
 
         await interaction.response.send_message(f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", ephemeral=True)
         asyncio.create_task(auto_delete_msg(await interaction.original_response()))
-
-    async def on_timeout(self):
-        async with data_lock:
-            info = channel_data.get(self.ch_num)
-            if info:
-                info.pop("pending_dib", None)
 
 
 class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
@@ -358,10 +365,11 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
         asyncio.create_task(auto_delete_msg(await interaction.original_response()))
 
         view = DibsApprovalView(ch, owner_id, interaction.user.id)
-        await interaction.channel.send(
+        msg = await interaction.channel.send(
             f"🔔 <@{owner_id}>, <@{interaction.user.id}> is requesting dibs for **Ch {ch}**. Do you accept or decline?",
             view=view
         )
+        view.message = msg
 
 
 class NonMemberTimerModal(discord.ui.Modal, title="Log Non-Member Timer"):
