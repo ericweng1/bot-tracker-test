@@ -10,6 +10,8 @@ from flask import Flask
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# Optional: Put your test server ID here for instant command syncing, or leave as None for global
+TEST_GUILD_ID = os.environ.get("TEST_GUILD_ID") # e.g. 123456789012345678
 TOTAL_CHANNELS = 40
 DEFAULT_MINUTES = 98
 HELPER_ROLE_NAME = "B2 Helper"
@@ -813,9 +815,17 @@ async def cleanup_expired():
 async def on_ready():
     load_data()
     bot.add_view(TrackerView(page=current_page))
+    
+    # Instant command syncing
     try:
-        await bot.tree.sync()
-        print("Slash commands synced successfully!")
+        if TEST_GUILD_ID:
+            guild_obj = discord.Object(id=int(TEST_GUILD_ID))
+            bot.tree.copy_global_to(guild=guild_obj)
+            await bot.tree.sync(guild=guild_obj)
+            print(f"Slash commands synced instantly to test guild ID: {TEST_GUILD_ID}")
+        else:
+            await bot.tree.sync()
+            print("Slash commands synced globally!")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
@@ -827,7 +837,7 @@ async def on_ready():
 
 # --- SLASH COMMANDS (WITH AUTOFILL / HINTS) ---
 
-@bot.tree.command(name="b2test", description="Post or reset the B2 channel tracker embed.")
+@bot.tree.command(name="b2", description="Post or reset the B2 channel tracker embed.")
 async def slash_b2(interaction: discord.Interaction):
     if not is_helper(interaction.user):
         await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", ephemeral=True)
@@ -915,31 +925,14 @@ async def slash_clearall(interaction: discord.Interaction):
     await interaction.response.send_message("🛡️ All channels reset to unknown.", ephemeral=True)
 
 
-# --- LEGACY TEXT COMMANDS (BACKWARD COMPATIBILITY) ---
+# --- INSTANT TESTING PREFIX COMMANDS (!test_...) ---
 
-@bot.command(name="b2")
-async def setup_b2(ctx):
+@bot.command(name="test_b2")
+async def test_b2(ctx):
     if not is_helper(ctx.author):
-        try:
-            await ctx.message.delete()
-            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", delete_after=5)
-        except discord.HTTPException:
-            pass
+        await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** can use test commands.", delete_after=5)
         return
-
     await ctx.message.delete()
-
-    old_ch_id = tracker_message_info.get("channel_id")
-    old_msg_id = tracker_message_info.get("message_id")
-    if old_ch_id and old_msg_id:
-        old_channel = bot.get_channel(old_ch_id)
-        if old_channel:
-            try:
-                old_msg = await old_channel.fetch_message(old_msg_id)
-                await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
     msg = await ctx.send(embed=build_embed(), view=TrackerView(page=1))
     tracker_message_info["channel_id"] = msg.channel.id
     tracker_message_info["message_id"] = msg.id
@@ -948,70 +941,47 @@ async def setup_b2(ctx):
     await save_data()
 
 
-@bot.command()
-async def clear_ch(ctx, ch: int):
+@bot.command(name="test_add")
+async def test_add(ctx, ch: int, minutes: int, member: discord.Member):
     if not is_helper(ctx.author):
         return
     await ctx.message.delete()
-    async with data_lock:
-        existed = ch in channel_data
-        if existed:
-            del channel_data[ch]
-    if existed:
-        await update_tracker_message()
-        await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
-    else:
-        await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
-
-
-@bot.command()
-async def clear_all(ctx):
-    if not is_helper(ctx.author):
-        return
-    await ctx.message.delete()
-    async with data_lock:
-        channel_data.clear()
-    await update_tracker_message()
-    await ctx.send("🛡️ All channels reset to unknown.", delete_after=5)
-
-
-@bot.command(name="add_member")
-async def add_member(ctx, ch: int, minutes: int, member: discord.Member):
-    if not is_helper(ctx.author):
-        try:
-            await ctx.message.delete()
-            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", delete_after=5)
-        except discord.HTTPException:
-            pass
-        return
-
-    await ctx.message.delete()
-
-    if ch < 1 or ch > TOTAL_CHANNELS or minutes < 1:
-        try:
-            await ctx.send("❌ Invalid channel number or minutes.", delete_after=5)
-        except discord.HTTPException:
-            pass
-        return
-
     now = int(time.time())
     async with data_lock:
-        for c, info in list(channel_data.items()):
-            if info.get("type") == "member" and info["user_id"] == member.id:
-                del channel_data[c]
-
         channel_data[ch] = {
             "type": "member",
             "user_id": member.id,
             "end_time": now + (minutes * 60),
             "queue": [],
         }
-
     await update_tracker_message()
-    try:
-        await ctx.send(f"🛡️ Manually assigned **Ch {ch}** to {member.mention} for **{minutes}m**.", delete_after=5)
-    except discord.HTTPException:
-        pass
+    msg = await ctx.send(f"🧪 [TEST] Assigned Ch {ch} to {member.mention} for {minutes}m.", delete_after=5)
+    asyncio.create_task(auto_delete_msg(msg))
+
+
+@bot.command(name="test_clear")
+async def test_clear(ctx, ch: int):
+    if not is_helper(ctx.author):
+        return
+    await ctx.message.delete()
+    async with data_lock:
+        if ch in channel_data:
+            del channel_data[ch]
+    await update_tracker_message()
+    msg = await ctx.send(f"🧪 [TEST] Cleared Ch {ch}.", delete_after=5)
+    asyncio.create_task(auto_delete_msg(msg))
+
+
+@bot.command(name="test_clearall")
+async def test_clearall(ctx):
+    if not is_helper(ctx.author):
+        return
+    await ctx.message.delete()
+    async with data_lock:
+        channel_data.clear()
+    await update_tracker_message()
+    msg = await ctx.send("🧪 [TEST] Reset all channels.", delete_after=5)
+    asyncio.create_task(auto_delete_msg(msg))
 
 
 if __name__ == "__main__":
