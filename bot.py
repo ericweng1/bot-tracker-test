@@ -11,7 +11,7 @@ from flask import Flask
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # Optional: Put your test server ID here for instant command syncing, or leave as None for global
-TEST_GUILD_ID = os.environ.get("TEST_GUILD_ID") # e.g. 123456789012345678
+TEST_GUILD_ID = 1569151015536820224
 TOTAL_CHANNELS = 40
 DEFAULT_MINUTES = 98
 HELPER_ROLE_NAME = "B2 Helper"
