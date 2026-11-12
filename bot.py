@@ -298,17 +298,21 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
             removed = []
             async with data_lock:
                 for ch, info in channel_data.items():
-                    if info.get("type") == "member" and "queue" in info and interaction.user.id in info["queue"]:
-                        info["queue"].remove(interaction.user.id)
-                        removed.append(ch)
+                    if info.get("type") == "member":
+                        if "queue" in info and interaction.user.id in info["queue"]:
+                            info["queue"].remove(interaction.user.id)
+                            removed.append(ch)
+                        if info.get("pending_dib") == interaction.user.id:
+                            info.pop("pending_dib", None)
+                            removed.append(ch)
 
             if removed:
-                ch_list = ", ".join([f"**Ch {ch}**" for ch in removed])
-                msg = await interaction.followup.send(f"✅ Removed your dibs from {ch_list}.", wait=True)
+                ch_list = ", ".join([f"**Ch {ch}**" for ch in set(removed)])
+                msg = await interaction.followup.send(f"✅ Removed your dibs/pending requests from {ch_list}.", wait=True)
                 asyncio.create_task(auto_delete_msg(msg))
                 await update_tracker_message()
             else:
-                msg = await interaction.followup.send("ℹ️ You have no active dibs to cancel.", wait=True)
+                msg = await interaction.followup.send("ℹ️ You have no active dibs or pending requests to cancel.", wait=True)
                 asyncio.create_task(auto_delete_msg(msg))
             return
 
@@ -323,7 +327,17 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
 
         now = int(time.time())
         owner_id = None
+        
         async with data_lock:
+            for c, info in channel_data.items():
+                if info.get("type") == "member":
+                    if interaction.user.id in info.get("queue", []):
+                        await interaction.response.send_message("❌ You already have active dibs on another channel! You can only hold one dib at a time.", ephemeral=True)
+                        return
+                    if info.get("pending_dib") == interaction.user.id:
+                        await interaction.response.send_message("❌ You already have a pending dibs request waiting for approval on another channel!", ephemeral=True)
+                        return
+
             info = channel_data.get(ch)
             if not info or info["end_time"] <= now or info["type"] == "non_member":
                 await interaction.response.send_message("ℹ️ Channel is unknown or non-member! Claim it directly.", ephemeral=True)
@@ -331,10 +345,6 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
 
             if info["user_id"] == interaction.user.id:
                 await interaction.response.send_message("❌ You already own this channel!", ephemeral=True)
-                return
-
-            if "queue" in info and interaction.user.id in info["queue"]:
-                await interaction.response.send_message("ℹ️ You already have dibs here.", ephemeral=True)
                 return
 
             if info.get("pending_dib"):
