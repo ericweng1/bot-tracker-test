@@ -4,6 +4,7 @@ import asyncio
 from threading import Thread
 import time
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask
 
@@ -472,7 +473,7 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
         await update_tracker_message()
 
 
-class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
+class HelperClearModal(discord.ui.Modal, title="Helper Management Option"):
     ch_input = discord.ui.TextInput(
         label=f"Channel Number (1 to {TOTAL_CHANNELS})",
         placeholder="e.g., 14",
@@ -515,6 +516,95 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
         msg = await interaction.followup.send(msg_text, wait=True)
         asyncio.create_task(auto_delete_msg(msg))
         await update_tracker_message()
+
+
+class HelperAssignModal(discord.ui.Modal, title="Helper: Assign Member"):
+    ch_input = discord.ui.TextInput(
+        label=f"Channel Number (1 to {TOTAL_CHANNELS})",
+        placeholder="e.g., 5",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+    user_input = discord.ui.TextInput(
+        label="Member User ID or Mention",
+        placeholder="e.g., 123456789012345678",
+        min_length=15,
+        max_length=22,
+        required=True,
+    )
+    mins_input = discord.ui.TextInput(
+        label="Duration in Minutes",
+        placeholder=f"Default is {DEFAULT_MINUTES}",
+        default=str(DEFAULT_MINUTES),
+        min_length=1,
+        max_length=3,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            ch = int(self.ch_input.value)
+            mins = int(self.mins_input.value)
+            raw_user = self.user_input.value.strip().replace("<@", "").replace(">", "").replace("!", "")
+            user_id = int(raw_user)
+            if ch < 1 or ch > TOTAL_CHANNELS or mins < 1:
+                msg = await interaction.followup.send("❌ Invalid channel, user ID, or duration.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
+                return
+        except ValueError:
+            msg = await interaction.followup.send("❌ Please enter valid numbers for channel, user ID, and minutes.", wait=True)
+            asyncio.create_task(auto_delete_msg(msg))
+            return
+
+        member = interaction.guild.get_member(user_id)
+        if not member:
+            try:
+                member = await interaction.guild.fetch_member(user_id)
+            except Exception:
+                msg = await interaction.followup.send("❌ Could not find that member in this server.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
+                return
+
+        now = int(time.time())
+        async with data_lock:
+            for c, info in list(channel_data.items()):
+                if info.get("type") == "member" and info["user_id"] == member.id:
+                    del channel_data[c]
+
+            channel_data[ch] = {
+                "type": "member",
+                "user_id": member.id,
+                "end_time": now + (mins * 60),
+                "queue": [],
+            }
+
+        await update_tracker_message()
+        msg = await interaction.followup.send(f"🛡️ Manually assigned **Ch {ch}** to {member.mention} for **{mins}m**.", wait=True)
+        asyncio.create_task(auto_delete_msg(msg))
+
+
+class HelperActionSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.select(
+        placeholder="Choose Helper Action...",
+        options=[
+            discord.SelectOption(label="Clear / Reset Channel", description="Reset channel or clear dibs", value="clear"),
+            discord.SelectOption(label="Assign Member", description="Manually assign a channel to a member", value="assign")
+        ]
+    )
+    async def select_action(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not is_helper(interaction.user):
+            await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this.", ephemeral=True)
+            return
+
+        if select.values[0] == "clear":
+            await interaction.response.send_modal(HelperClearModal())
+        elif select.values[0] == "assign":
+            await interaction.response.send_modal(HelperAssignModal())
 
 
 # --- VIEWS & BUTTONS ---
@@ -664,14 +754,14 @@ class LeaveChannelButton(discord.ui.Button):
 
 class HelperClearButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🛡️ Helper Clear", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=4)
+        super().__init__(label="🛡️ Helper Actions", style=discord.ButtonStyle.secondary, custom_id="helper_clear_btn", row=4)
 
     async def callback(self, interaction: discord.Interaction):
         if not is_helper(interaction.user):
             await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this.", ephemeral=True)
             asyncio.create_task(auto_delete_msg(await interaction.original_response()))
             return
-        await interaction.response.send_modal(HelperClearModal())
+        await interaction.response.send_message("Select helper action:", view=HelperActionSelectView(), ephemeral=True)
 
 
 class TrackerView(discord.ui.View):
@@ -723,13 +813,111 @@ async def cleanup_expired():
 async def on_ready():
     load_data()
     bot.add_view(TrackerView(page=current_page))
+    try:
+        await bot.tree.sync()
+        print("Slash commands synced successfully!")
+    except Exception as e:
+        print(f"Failed to sync slash commands: {e}")
+
     if not cleanup_expired.is_running():
         cleanup_expired.start()
     print(f"Unified Bot logged in as {bot.user}!")
     await update_tracker_message()
 
 
-@bot.command(name="b2test")
+# --- SLASH COMMANDS (WITH AUTOFILL / HINTS) ---
+
+@bot.tree.command(name="b2test", description="Post or reset the B2 channel tracker embed.")
+async def slash_b2(interaction: discord.Interaction):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    old_ch_id = tracker_message_info.get("channel_id")
+    old_msg_id = tracker_message_info.get("message_id")
+    if old_ch_id and old_msg_id:
+        old_channel = bot.get_channel(old_ch_id)
+        if old_channel:
+            try:
+                old_msg = await old_channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    msg = await interaction.channel.send(embed=build_embed(), view=TrackerView(page=1))
+    tracker_message_info["channel_id"] = msg.channel.id
+    tracker_message_info["message_id"] = msg.id
+    global current_page
+    current_page = 1
+    await save_data()
+    await interaction.followup.send("✅ Tracker posted successfully!", ephemeral=True)
+
+
+@bot.tree.command(name="add", description="Manually assign a channel to a member.")
+@app_commands.describe(channel="Channel number (1-40)", member="The member to assign", minutes="Duration in minutes (optional)")
+async def slash_add(interaction: discord.Interaction, channel: int, member: discord.Member, minutes: int = DEFAULT_MINUTES):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
+        return
+
+    if channel < 1 or channel > TOTAL_CHANNELS or minutes < 1:
+        await interaction.response.send_message("❌ Invalid channel number or minutes.", ephemeral=True)
+        return
+
+    now = int(time.time())
+    async with data_lock:
+        for c, info in list(channel_data.items()):
+            if info.get("type") == "member" and info["user_id"] == member.id:
+                del channel_data[c]
+
+        channel_data[channel] = {
+            "type": "member",
+            "user_id": member.id,
+            "end_time": now + (minutes * 60),
+            "queue": [],
+        }
+
+    await update_tracker_message()
+    await interaction.response.send_message(f"🛡️ Manually assigned **Ch {channel}** to {member.mention} for **{minutes}m**.", ephemeral=True)
+
+
+@bot.tree.command(name="clear", description="Clear a specific channel.")
+@app_commands.describe(channel="Channel number (1-40)")
+async def slash_clear(interaction: discord.Interaction, channel: int):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
+        return
+
+    async with data_lock:
+        existed = channel in channel_data
+        if existed:
+            del channel_data[channel]
+
+    if existed:
+        await update_tracker_message()
+        await interaction.response.send_message(f"🛡️ Cleared **Ch {channel}**.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"ℹ️ **Ch {channel}** is already unknown.", ephemeral=True)
+
+
+@bot.tree.command(name="clearall", description="Reset all channels to unknown.")
+async def slash_clearall(interaction: discord.Interaction):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
+        return
+
+    async with data_lock:
+        channel_data.clear()
+
+    await update_tracker_message()
+    await interaction.response.send_message("🛡️ All channels reset to unknown.", ephemeral=True)
+
+
+# --- LEGACY TEXT COMMANDS (BACKWARD COMPATIBILITY) ---
+
+@bot.command(name="b2")
 async def setup_b2(ctx):
     if not is_helper(ctx.author):
         try:
