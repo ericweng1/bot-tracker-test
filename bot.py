@@ -271,15 +271,18 @@ class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
         try:
             mins = int(self.minutes_input.value)
             if mins < 1 or mins > DEFAULT_MINUTES:
-                await interaction.followup.send(f"❌ Enter between 1 and {DEFAULT_MINUTES}.", ephemeral=True)
+                msg = await interaction.followup.send(f"❌ Enter between 1 and {DEFAULT_MINUTES}.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
                 return
         except ValueError:
-            await interaction.followup.send("❌ Enter a valid number.", ephemeral=True)
+            msg = await interaction.followup.send("❌ Enter a valid number.", wait=True)
+            asyncio.create_task(auto_delete_msg(msg))
             return
 
         async with data_lock:
             if self.ch_num not in channel_data:
-                await interaction.followup.send("❌ Channel no longer active.", ephemeral=True)
+                msg = await interaction.followup.send("❌ Channel no longer active.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
                 return
             channel_data[self.ch_num]["end_time"] = int(time.time()) + (mins * 60)
 
@@ -327,9 +330,11 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
             ch = int(val)
             if ch < 1 or ch > TOTAL_CHANNELS:
                 await interaction.response.send_message(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                 return
         except ValueError:
             await interaction.response.send_message("❌ Enter a valid channel number or 'cancel'.", ephemeral=True)
+            asyncio.create_task(auto_delete_msg(await interaction.original_response()))
             return
 
         now = int(time.time())
@@ -340,22 +345,27 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
                 if info.get("type") == "member":
                     if interaction.user.id in info.get("queue", []):
                         await interaction.response.send_message("❌ You already have active dibs on another channel! You can only hold one dib at a time.", ephemeral=True)
+                        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                         return
                     if info.get("pending_dib") == interaction.user.id:
                         await interaction.response.send_message("❌ You already have a pending dibs request waiting for approval on another channel!", ephemeral=True)
+                        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                         return
 
             info = channel_data.get(ch)
             if not info or info["end_time"] <= now or info["type"] == "non_member":
                 await interaction.response.send_message("ℹ️ Channel is unknown or non-member! Claim it directly.", ephemeral=True)
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                 return
 
             if info["user_id"] == interaction.user.id:
                 await interaction.response.send_message("❌ You already own this channel!", ephemeral=True)
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                 return
 
             if info.get("pending_dib"):
                 await interaction.response.send_message("⚠️ There is already a pending dibs request for this channel. Please wait until it is processed.", ephemeral=True)
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                 return
 
             info["pending_dib"] = interaction.user.id
@@ -400,10 +410,12 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
         try:
             ch = int(self.ch_input.value)
             if ch < 1 or ch > TOTAL_CHANNELS:
-                await interaction.followup.send(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", ephemeral=True)
+                msg = await interaction.followup.send(f"❌ Enter between 1 and {TOTAL_CHANNELS}.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
                 return
         except ValueError:
-            await interaction.followup.send("❌ Enter a valid channel number.", ephemeral=True)
+            msg = await interaction.followup.send("❌ Enter a valid channel number.", wait=True)
+            asyncio.create_task(auto_delete_msg(msg))
             return
 
         mins_val = self.mins_input.value.strip().lower()
@@ -428,10 +440,12 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
         try:
             mins = int(mins_val)
             if mins < 1:
-                await interaction.followup.send("❌ Minutes must be at least 1.", ephemeral=True)
+                msg = await interaction.followup.send("❌ Minutes must be at least 1.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
                 return
         except ValueError:
-            await interaction.followup.send("❌ Enter valid minutes or 'clear'.", ephemeral=True)
+            msg = await interaction.followup.send("❌ Enter valid minutes or 'clear'.", wait=True)
+            asyncio.create_task(auto_delete_msg(msg))
             return
 
         nm_name = self.name_input.value.strip()
@@ -442,7 +456,8 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
         async with data_lock:
             current = channel_data.get(ch)
             if current and current["end_time"] > now and current.get("type") == "member":
-                await interaction.followup.send(f"❌ Cannot log non-member timer: **Ch {ch}** currently has an active member claim!", ephemeral=True)
+                msg = await interaction.followup.send(f"❌ Cannot log non-member timer: **Ch {ch}** currently has an active member claim!", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
                 return
 
             channel_data[ch] = {
@@ -486,7 +501,8 @@ class HelperClearModal(discord.ui.Modal, title="Helper Clear Option"):
 
         async with data_lock:
             if ch not in channel_data:
-                await interaction.followup.send("ℹ️ Channel already unknown.", ephemeral=True)
+                msg = await interaction.followup.send("ℹ️ Channel already unknown.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
                 return
             if val in ["2", "dibs", "dib"] and channel_data[ch].get("type") == "member":
                 channel_data[ch]["queue"] = []
@@ -537,11 +553,13 @@ class ChannelButton(discord.ui.Button):
             if current and current["end_time"] > now:
                 if current["type"] == "member" and current["user_id"] != interaction.user.id:
                     await interaction.response.send_message(f"⚠️ Ch {self.ch_num} is claimed. Use Dibs!", ephemeral=True)
+                    asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                     return
                 elif current["type"] == "non_member":
                     pass
                 elif current["type"] == "member" and current["user_id"] == interaction.user.id:
                     await interaction.response.send_message(f"ℹ️ You already hold Ch {self.ch_num}.", ephemeral=True)
+                    asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                     return
 
             for ch, info in list(channel_data.items()):
@@ -584,6 +602,7 @@ class EditTimerButton(discord.ui.Button):
         )
         if not user_ch:
             await interaction.response.send_message("❌ You don't have an active member channel claimed!", ephemeral=True)
+            asyncio.create_task(auto_delete_msg(await interaction.original_response()))
             return
         await interaction.response.send_modal(EditTimerModal(user_ch))
 
@@ -612,6 +631,7 @@ class LeaveChannelButton(discord.ui.Button):
             )
             if not user_ch:
                 await interaction.response.send_message("❌ You don't have a member channel claimed.", ephemeral=True)
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                 return
 
             released_ch = user_ch
@@ -649,6 +669,7 @@ class HelperClearButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if not is_helper(interaction.user):
             await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this.", ephemeral=True)
+            asyncio.create_task(auto_delete_msg(await interaction.original_response()))
             return
         await interaction.response.send_modal(HelperClearModal())
 
