@@ -189,7 +189,11 @@ class DibsApprovalView(discord.ui.View):
         async with data_lock:
             info = channel_data.get(self.ch_num)
             if not info or info.get("end_time", 0) <= now or info.get("user_id") != self.owner_id:
-                await interaction.response.edit_message(content="❌ This channel is no longer active or yours.", view=None)
+                try:
+                    await interaction.message.delete()
+                except Exception:
+                    pass
+                await interaction.response.send_message("❌ This channel is no longer active or yours.", ephemeral=True)
                 return
 
             info.pop("pending_dib", None)
@@ -198,14 +202,22 @@ class DibsApprovalView(discord.ui.View):
                 info["queue"] = []
 
             if self.requester_id in info["queue"]:
-                await interaction.response.edit_message(content=f"ℹ️ <@{self.requester_id}> is already in the dibs queue for **Ch {self.ch_num}**.", view=None)
+                try:
+                    await interaction.message.delete()
+                except Exception:
+                    pass
+                await interaction.response.send_message(f"ℹ️ <@{self.requester_id}> is already in the dibs queue for **Ch {self.ch_num}**.", ephemeral=True)
                 return
 
             info["queue"].append(self.requester_id)
 
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(content=f"✅ <@{self.owner_id}> accepted dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", view=self)
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
+        await interaction.response.send_message(f"✅ <@{self.owner_id}> accepted dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", ephemeral=True)
+        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
         await update_tracker_message()
 
     @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
@@ -219,9 +231,13 @@ class DibsApprovalView(discord.ui.View):
             if info:
                 info.pop("pending_dib", None)
 
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(content=f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", view=self)
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
+        await interaction.response.send_message(f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", ephemeral=True)
+        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
 
     async def on_timeout(self):
         async with data_lock:
@@ -292,7 +308,8 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
                 asyncio.create_task(auto_delete_msg(msg))
                 await update_tracker_message()
             else:
-                await interaction.followup.send("ℹ️ You have no active dibs to cancel.", ephemeral=True)
+                msg = await interaction.followup.send("ℹ️ You have no active dibs to cancel.", wait=True)
+                asyncio.create_task(auto_delete_msg(msg))
             return
 
         try:
@@ -328,6 +345,7 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
             owner_id = info["user_id"]
 
         await interaction.response.send_message(f"⏳ Sent a dibs request to <@{owner_id}> for **Ch {ch}**.", ephemeral=True)
+        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
 
         view = DibsApprovalView(ch, owner_id, interaction.user.id)
         await interaction.channel.send(
