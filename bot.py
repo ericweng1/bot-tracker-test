@@ -872,4 +872,251 @@ async def cleanup_expired():
                         audit_events.append(f"⏰ **Ch {ch}** (<@{info['user_id']}>) timer expired and reset to unknown.")
                     else:
                         nm_name = info.get("name", "Non-Member")
-                        audit_events.append(f"⏰ **Ch {ch}** non-member timer (**{nm_name}**) expired and reset
+                        audit_events.append(f"⏰ **Ch {ch}** non-member timer (**{nm_name}**) expired and reset to unknown.")
+                    del channel_data[ch]
+                    updated = True
+
+    for event in audit_events:
+        await send_audit_log(event)
+
+    if updated:
+        await update_tracker_message()
+
+
+@bot.event
+async def on_ready():
+    await load_data()
+    bot.add_view(TrackerView(page=current_page))
+    
+    try:
+        guild_obj = discord.Object(id=TEST_GUILD_ID)
+        bot.tree.copy_global_to(guild=guild_obj)
+        await bot.tree.sync(guild=guild_obj)
+        print(f"B2 Slash commands synced instantly to test guild ID: {TEST_GUILD_ID}")
+    except Exception as e:
+        print(f"Failed to sync B2 slash commands: {e}")
+
+    if not cleanup_expired.is_running():
+        cleanup_expired.start()
+    print(f"B2 Bot logged in as {bot.user} with MongoDB persistence!")
+    await update_tracker_message()
+
+
+# --- SLASH COMMANDS (B2) ---
+
+@bot.tree.command(name="b2", description="Post or reset the B2 channel tracker embed.")
+async def slash_b2(interaction: discord.Interaction):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    old_ch_id = tracker_message_info.get("channel_id")
+    old_msg_id = tracker_message_info.get("message_id")
+    if old_ch_id and old_msg_id:
+        old_channel = bot.get_channel(old_ch_id)
+        if old_channel:
+            try:
+                old_msg = await old_channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    msg = await interaction.channel.send(embed=build_embed(), view=TrackerView(page=1))
+    tracker_message_info["channel_id"] = msg.channel.id
+    tracker_message_info["message_id"] = msg.id
+    global current_page
+    current_page = 1
+    await save_data()
+    await interaction.followup.send("✅ B2 Tracker posted successfully!", ephemeral=True)
+    await send_audit_log(f"📋 [Staff] <@{interaction.user.id}> posted/reset the B2 tracker board in <#{msg.channel.id}>.")
+
+
+@bot.tree.command(name="b2add", description="Manually assign a B2 channel to a member.")
+@app_commands.describe(channel="Channel number (1-40)", member="The member to assign", minutes="Duration in minutes (optional)")
+async def slash_b2add(interaction: discord.Interaction, channel: int, member: discord.Member, minutes: int = DEFAULT_MINUTES):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
+        return
+
+    if channel < 1 or channel > TOTAL_CHANNELS or minutes < 1:
+        await interaction.response.send_message("❌ Invalid channel number or minutes.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    now = int(time.time())
+    async with data_lock:
+        for c, info in list(channel_data.items()):
+            if info.get("type") == "member" and info["user_id"] == member.id:
+                del channel_data[c]
+
+        channel_data[channel] = {
+            "type": "member",
+            "user_id": member.id,
+            "end_time": now + (minutes * 60),
+            "queue": [],
+        }
+
+    await interaction.followup.send(f"🛡️ Manually assigned **Ch {channel}** to {member.mention} for **{minutes}m**.", ephemeral=True)
+    await send_audit_log(f"🛡️ [Staff] <@{interaction.user.id}> manually assigned **Ch {channel}** to {member.mention} for **{minutes}m** via `/b2add`.")
+    await update_tracker_message()
+
+
+@bot.tree.command(name="b2clear", description="Clear a specific B2 channel.")
+@app_commands.describe(channel="Channel number (1-40)")
+async def slash_b2clear(interaction: discord.Interaction, channel: int):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with data_lock:
+        existed = channel in channel_data
+        if existed:
+            del channel_data[channel]
+
+    if existed:
+        await interaction.followup.send(f"🛡️ Cleared **Ch {channel}**.", ephemeral=True)
+        await send_audit_log(f"🛡️ [Staff] <@{interaction.user.id}> cleared **Ch {channel}** via `/b2clear`.")
+        await update_tracker_message()
+    else:
+        await interaction.followup.send(f"ℹ️ **Ch {channel}** is already unknown.", ephemeral=True)
+
+
+@bot.tree.command(name="b2clearall", description="Reset all B2 channels to unknown.")
+async def slash_b2clearall(interaction: discord.Interaction):
+    if not is_helper(interaction.user):
+        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with data_lock:
+        channel_data.clear()
+
+    await interaction.followup.send("🛡️ All B2 channels reset to unknown.", ephemeral=True)
+    await send_audit_log(f"🛡️ [Staff] <@{interaction.user.id}> reset all B2 channels to unknown via `/b2clearall`.")
+    await update_tracker_message()
+
+
+# --- LEGACY TEXT COMMANDS (! PREFIX) ---
+
+@bot.command(name="startb2")
+async def setup_b2_text(ctx):
+    if not is_helper(ctx.author):
+        try:
+            await ctx.message.delete()
+            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", delete_after=5)
+        except discord.HTTPException:
+            pass
+        return
+
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+    old_ch_id = tracker_message_info.get("channel_id")
+    old_msg_id = tracker_message_info.get("message_id")
+    if old_ch_id and old_msg_id:
+        old_channel = bot.get_channel(old_ch_id)
+        if old_channel:
+            try:
+                old_msg = await old_channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    msg = await ctx.send(embed=build_embed(), view=TrackerView(page=1))
+    tracker_message_info["channel_id"] = msg.channel.id
+    tracker_message_info["message_id"] = msg.id
+    global current_page
+    current_page = 1
+    await save_data()
+    await send_audit_log(f"📋 [Staff] <@{ctx.author.id}> posted/reset the B2 tracker board in <#{msg.channel.id}> via `!startb2`.")
+
+
+@bot.command(name="b2clear")
+async def clear_b2_ch(ctx, ch: int):
+    if not is_helper(ctx.author):
+        return
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+    async with data_lock:
+        existed = ch in channel_data
+        if existed:
+            del channel_data[ch]
+    if existed:
+        await send_audit_log(f"🛡️ [Staff] <@{ctx.author.id}> cleared **Ch {ch}** via `!b2clear`.")
+        await update_tracker_message()
+        await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
+    else:
+        await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
+
+
+@bot.command(name="b2clearall")
+async def clear_all_b2(ctx):
+    if not is_helper(ctx.author):
+        return
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+    async with data_lock:
+        channel_data.clear()
+    await send_audit_log(f"🛡️ [Staff] <@{ctx.author.id}> reset all B2 channels to unknown via `!b2clearall`.")
+    await update_tracker_message()
+    await ctx.send("🛡️ All B2 channels reset to unknown.", delete_after=5)
+
+
+@bot.command(name="b2add")
+async def add_b2_member(ctx, ch: int, minutes: int, member: discord.Member):
+    if not is_helper(ctx.author):
+        try:
+            await ctx.message.delete()
+            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", delete_after=5)
+        except discord.HTTPException:
+            pass
+        return
+
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
+
+    if ch < 1 or ch > TOTAL_CHANNELS or minutes < 1:
+        try:
+            await ctx.send("❌ Invalid channel number or minutes.", delete_after=5)
+        except discord.HTTPException:
+            pass
+        return
+
+    now = int(time.time())
+    async with data_lock:
+        for c, info in list(channel_data.items()):
+            if info.get("type") == "member" and info["user_id"] == member.id:
+                del channel_data[c]
+
+        channel_data[ch] = {
+            "type": "member",
+            "user_id": member.id,
+            "end_time": now + (minutes * 60),
+            "queue": [],
+        }
+
+    await send_audit_log(f"🛡️ [Staff] <@{ctx.author.id}> manually assigned **Ch {ch}** to {member.mention} for **{minutes}m** via `!b2add`.")
+    await update_tracker_message()
+    try:
+        await ctx.send(f"🛡️ Manually assigned **Ch {ch}** to {member.mention} for **{minutes}m**.", delete_after=5)
+    except discord.HTTPException:
+        pass
+
+
+if __name__ == "__main__":
+    keep_alive()
+    bot.run(BOT_TOKEN)
