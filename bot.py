@@ -12,24 +12,25 @@ import motor.motor_asyncio
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URI = os.environ.get("MONGO_URI")
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", 0))
 TEST_GUILD_ID = 1569151015536820224
 TOTAL_CHANNELS = 40
 DEFAULT_MINUTES = 98
-HELPER_ROLE_NAME = "B3 Helper"
+HELPER_ROLE_NAME = "B2 Helper"
 AUTO_DELETE_SECONDS = 5
 # ---------------------
 
 # --- MONGODB SETUP ---
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["b2_subway_db"]
-state_collection = db["b3_board_state"]
+state_collection = db["b2_board_state"]
 
 # --- KEEP-ALIVE WEB SERVER ---
 app = Flask("")
 
 @app.route("/")
 def home():
-    return "B3 Subway Unified Tracker Bot is online with MongoDB!"
+    return "B2 Subway Unified Tracker Bot is online with MongoDB!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -49,6 +50,19 @@ channel_data = {}
 tracker_message_info = {"channel_id": None, "message_id": None}
 current_page = 1
 data_lock = asyncio.Lock()
+
+
+async def send_audit_log(text: str):
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
+            log_channel = await bot.fetch_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(f"[B2] {text}")
+    except Exception as e:
+        print(f"[Audit Log Error]: {e}")
 
 
 def is_helper(member: discord.Member) -> bool:
@@ -103,14 +117,14 @@ def format_duration(minutes: int) -> str:
 def build_embed():
     now = int(time.time())
     embed = discord.Embed(
-        title="🚇 B3 Subway Line — Jr. Wraith Channel Tracker",
+        title="🚇 B2 Subway Line — Jr. Wraith Channel Tracker",
         description=(
             "Use the **Dropdown** to switch channel pages (**1–10**, **11–20**,"
             " **21–30**, **31–40**).\n"
             "🟢 = Member Claimed | 🔴 = Non-Member Timer | 🟠 = Unknown\n"
             "Click a **Channel Button** to claim it as a member, or use **Log Non-Member**!"
         ),
-        color=discord.Color.blue(),
+        color=discord.Color.green(),
     )
 
     lines_left = []
@@ -163,7 +177,7 @@ async def update_tracker_message():
     try:
         msg = await channel.fetch_message(msg_id)
         await msg.edit(embed=build_embed(), view=TrackerView(page=current_page))
-    except discord.NotFound:
+    except (discord.NotFound, discord.Forbidden):
         tracker_message_info["channel_id"] = None
         tracker_message_info["message_id"] = None
         await save_data()
@@ -188,11 +202,16 @@ class DibsApprovalView(discord.ui.View):
         self.message = None
 
     async def on_timeout(self):
+        timed_out = False
         async with data_lock:
             info = channel_data.get(self.ch_num)
-            if info:
+            if info and info.get("pending_dib") == self.requester_id:
                 info.pop("pending_dib", None)
+                timed_out = True
         
+        if timed_out:
+            await send_audit_log(f"⏳ Dibs request from <@{self.requester_id}> for **Ch {self.ch_num}** (Owned by <@{self.owner_id}>) timed out.")
+
         if self.message:
             try:
                 await self.message.delete()
@@ -231,13 +250,15 @@ class DibsApprovalView(discord.ui.View):
 
             info["queue"].append(self.requester_id)
 
+        await interaction.response.send_message(f"✅ <@{self.owner_id}> accepted dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", ephemeral=True)
+        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+
         try:
             await interaction.message.delete()
         except Exception:
             pass
 
-        await interaction.response.send_message(f"✅ <@{self.owner_id}> accepted dibs for <@{self.requester_id}> on **Ch {self.ch_num}**!", ephemeral=True)
-        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+        await send_audit_log(f"✅ <@{self.owner_id}> accepted dibs for <@{self.requester_id}> on **Ch {self.ch_num}**.")
         await update_tracker_message()
 
     @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
@@ -251,13 +272,15 @@ class DibsApprovalView(discord.ui.View):
             if info:
                 info.pop("pending_dib", None)
 
+        await interaction.response.send_message(f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", ephemeral=True)
+        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+
         try:
             await interaction.message.delete()
         except Exception:
             pass
 
-        await interaction.response.send_message(f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.", ephemeral=True)
-        asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+        await send_audit_log(f"❌ <@{self.owner_id}> declined dibs request from <@{self.requester_id}> for **Ch {self.ch_num}**.")
 
 
 class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
@@ -286,15 +309,19 @@ class EditTimerModal(discord.ui.Modal, title="Edit Remaining Channel Time"):
             asyncio.create_task(auto_delete_msg(msg))
             return
 
+        now = int(time.time())
         async with data_lock:
             if self.ch_num not in channel_data:
                 msg = await interaction.followup.send("❌ Channel no longer active.", wait=True)
                 asyncio.create_task(auto_delete_msg(msg))
                 return
-            channel_data[self.ch_num]["end_time"] = int(time.time()) + (mins * 60)
+            old_end = channel_data[self.ch_num]["end_time"]
+            old_mins = max(0, round((old_end - now) / 60))
+            channel_data[self.ch_num]["end_time"] = now + (mins * 60)
 
         msg = await interaction.followup.send(f"⏱️ <@{interaction.user.id}> updated **Ch {self.ch_num}** to **{mins}m**.", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
+        await send_audit_log(f"⏱️ <@{interaction.user.id}> updated **Ch {self.ch_num}** remaining time from **{old_mins}m** to **{mins}m**.")
         await update_tracker_message()
 
 
@@ -324,9 +351,11 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
                             removed.append(ch)
 
             if removed:
-                ch_list = ", ".join([f"**Ch {ch}**" for ch in set(removed)])
+                unique_chs = sorted(list(set(removed)))
+                ch_list = ", ".join([f"**Ch {ch}**" for ch in unique_chs])
                 msg = await interaction.followup.send(f"✅ Removed your dibs/pending requests from {ch_list}.", wait=True)
                 asyncio.create_task(auto_delete_msg(msg))
+                await send_audit_log(f"🗑️ <@{interaction.user.id}> cancelled their dibs/pending request on {ch_list}.")
                 await update_tracker_message()
             else:
                 msg = await interaction.followup.send("ℹ️ You have no active dibs or pending requests to cancel.", wait=True)
@@ -380,6 +409,7 @@ class CombinedDibsModal(discord.ui.Modal, title="Dibs Management"):
 
         await interaction.response.send_message(f"⏳ Sent a dibs request to <@{owner_id}> for **Ch {ch}**.", ephemeral=True)
         asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+        await send_audit_log(f"🙋 <@{interaction.user.id}> requested dibs on **Ch {ch}** (Owned by <@{owner_id}>).")
 
         view = DibsApprovalView(ch, owner_id, interaction.user.id)
         msg = await interaction.channel.send(
@@ -427,9 +457,11 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
 
         mins_val = self.mins_input.value.strip().lower()
         if mins_val in ["clear", "c", "remove", "delete"]:
+            old_name = "Non-Member"
             async with data_lock:
                 current = channel_data.get(ch)
                 if current and current.get("type") == "non_member":
+                    old_name = current.get("name", "Non-Member")
                     del channel_data[ch]
                     cleared = True
                 else:
@@ -438,6 +470,7 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
             if cleared:
                 msg = await interaction.followup.send(f"🧹 Cleared non-member timer for **Ch {ch}**.", wait=True)
                 asyncio.create_task(auto_delete_msg(msg))
+                await send_audit_log(f"🧹 <@{interaction.user.id}> cleared non-member timer (**{old_name}**) for **Ch {ch}**.")
                 await update_tracker_message()
             else:
                 msg = await interaction.followup.send(f"ℹ️ **Ch {ch}** does not have an active non-member timer.", wait=True)
@@ -476,6 +509,7 @@ class NonMemberTimerModal(discord.ui.Modal, title="Log / Clear Non-Member Timer"
 
         msg = await interaction.followup.send(f"🔴 <@{interaction.user.id}> logged **{nm_name}** timer for **Ch {ch}** (**{mins}m**).", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
+        await send_audit_log(f"🔴 <@{interaction.user.id}> logged **{nm_name}** timer for **Ch {ch}** (**{mins}m**).")
         await update_tracker_message()
 
 
@@ -515,12 +549,15 @@ class HelperClearModal(discord.ui.Modal, title="Helper Management Option"):
                 channel_data[ch]["queue"] = []
                 channel_data[ch].pop("pending_dib", None)
                 msg_text = f"🛡️ Cleared dibs for **Ch {ch}**."
+                audit_text = f"🛡️ [Staff] <@{interaction.user.id}> cleared dibs queue for **Ch {ch}**."
             else:
                 del channel_data[ch]
                 msg_text = f"🛡️ Reset **Ch {ch}** to unknown."
+                audit_text = f"🛡️ [Staff] <@{interaction.user.id}> reset **Ch {ch}** to unknown."
 
         msg = await interaction.followup.send(msg_text, wait=True)
         asyncio.create_task(auto_delete_msg(msg))
+        await send_audit_log(audit_text)
         await update_tracker_message()
 
 
@@ -586,9 +623,10 @@ class HelperAssignModal(discord.ui.Modal, title="Helper: Assign Member"):
                 "queue": [],
             }
 
-        await update_tracker_message()
         msg = await interaction.followup.send(f"🛡️ Manually assigned **Ch {ch}** to {member.mention} for **{mins}m**.", wait=True)
         asyncio.create_task(auto_delete_msg(msg))
+        await send_audit_log(f"🛡️ [Staff] <@{interaction.user.id}> manually assigned **Ch {ch}** to {member.mention} for **{mins}m**.")
+        await update_tracker_message()
 
 
 class HelperActionSelectView(discord.ui.View):
@@ -644,6 +682,9 @@ class ChannelButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         now = int(time.time())
+        prev_ch = None
+        overrode_nm = None
+
         async with data_lock:
             current = channel_data.get(self.ch_num)
             if current and current["end_time"] > now:
@@ -652,7 +693,7 @@ class ChannelButton(discord.ui.Button):
                     asyncio.create_task(auto_delete_msg(await interaction.original_response()))
                     return
                 elif current["type"] == "non_member":
-                    pass
+                    overrode_nm = current.get("name", "Non-Member")
                 elif current["type"] == "member" and current["user_id"] == interaction.user.id:
                     await interaction.response.send_message(f"ℹ️ You already hold Ch {self.ch_num}.", ephemeral=True)
                     asyncio.create_task(auto_delete_msg(await interaction.original_response()))
@@ -660,6 +701,7 @@ class ChannelButton(discord.ui.Button):
 
             for ch, info in list(channel_data.items()):
                 if info.get("type") == "member" and info["user_id"] == interaction.user.id:
+                    prev_ch = ch
                     del channel_data[ch]
 
             channel_data[self.ch_num] = {
@@ -675,6 +717,15 @@ class ChannelButton(discord.ui.Button):
             asyncio.create_task(auto_delete_msg(msg))
         except Exception:
             pass
+
+        extra_notes = []
+        if prev_ch:
+            extra_notes.append(f"released **Ch {prev_ch}**")
+        if overrode_nm:
+            extra_notes.append(f"overrode non-member timer **{overrode_nm}**")
+        note_str = f" *({', '.join(extra_notes)})*" if extra_notes else ""
+
+        await send_audit_log(f"🟢 <@{interaction.user.id}> claimed **Ch {self.ch_num}** for **{format_duration(DEFAULT_MINUTES)}**{note_str}.")
         await update_tracker_message()
 
 
@@ -747,14 +798,19 @@ class LeaveChannelButton(discord.ui.Button):
 
         if next_user_id:
             await interaction.response.send_message(f"🚪 <@{interaction.user.id}> released **Ch {released_ch}** ➡️ Automatically claimed by <@{next_user_id}> for **{format_duration(DEFAULT_MINUTES)}**!")
+            try:
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+            except Exception:
+                pass
+            await send_audit_log(f"🚪 <@{interaction.user.id}> released **Ch {released_ch}** ➡️ Automatically passed to <@{next_user_id}> for **{format_duration(DEFAULT_MINUTES)}**.")
         else:
             await interaction.response.send_message(f"🚪 <@{interaction.user.id}> released **Ch {released_ch}**.")
+            try:
+                asyncio.create_task(auto_delete_msg(await interaction.original_response()))
+            except Exception:
+                pass
+            await send_audit_log(f"🚪 <@{interaction.user.id}> released **Ch {released_ch}** (now unknown).")
 
-        try:
-            msg = await interaction.original_response()
-            asyncio.create_task(auto_delete_msg(msg))
-        except Exception:
-            pass
         await update_tracker_message()
 
 
@@ -794,11 +850,14 @@ class TrackerView(discord.ui.View):
 async def cleanup_expired():
     now = int(time.time())
     updated = False
+    audit_events = []
+
     async with data_lock:
         for ch, info in list(channel_data.items()):
             if info["end_time"] <= now:
                 queue_list = info.get("queue", [])
                 if queue_list and info.get("type") == "member":
+                    old_user_id = info["user_id"]
                     next_user_id = queue_list.pop(0)
                     channel_data[ch] = {
                         "type": "member",
@@ -806,236 +865,11 @@ async def cleanup_expired():
                         "end_time": now + (DEFAULT_MINUTES * 60),
                         "queue": queue_list,
                     }
+                    audit_events.append(f"⏰ **Ch {ch}** (<@{old_user_id}>) expired ➡️ Automatically passed to <@{next_user_id}> for **{format_duration(DEFAULT_MINUTES)}**.")
                     updated = True
                 else:
-                    del channel_data[ch]
-                    updated = True
-
-    if updated:
-        await update_tracker_message()
-
-
-@bot.event
-async def on_ready():
-    await load_data()
-    bot.add_view(TrackerView(page=current_page))
-    
-    try:
-        guild_obj = discord.Object(id=TEST_GUILD_ID)
-        bot.tree.copy_global_to(guild=guild_obj)
-        await bot.tree.sync(guild=guild_obj)
-        print(f"B3 Slash commands synced instantly to test guild ID: {TEST_GUILD_ID}")
-    except Exception as e:
-        print(f"Failed to sync B3 slash commands: {e}")
-
-    if not cleanup_expired.is_running():
-        cleanup_expired.start()
-    print(f"B3 Bot logged in as {bot.user} with MongoDB persistence!")
-    await update_tracker_message()
-
-
-# --- SLASH COMMANDS (B3) ---
-
-@bot.tree.command(name="b3", description="Post or reset the B3 channel tracker embed.")
-async def slash_b3(interaction: discord.Interaction):
-    if not is_helper(interaction.user):
-        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    old_ch_id = tracker_message_info.get("channel_id")
-    old_msg_id = tracker_message_info.get("message_id")
-    if old_ch_id and old_msg_id:
-        old_channel = bot.get_channel(old_ch_id)
-        if old_channel:
-            try:
-                old_msg = await old_channel.fetch_message(old_msg_id)
-                await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
-    msg = await interaction.channel.send(embed=build_embed(), view=TrackerView(page=1))
-    tracker_message_info["channel_id"] = msg.channel.id
-    tracker_message_info["message_id"] = msg.id
-    global current_page
-    current_page = 1
-    await save_data()
-    await interaction.followup.send("✅ B3 Tracker posted successfully!", ephemeral=True)
-
-
-@bot.tree.command(name="b3add", description="Manually assign a B3 channel to a member.")
-@app_commands.describe(channel="Channel number (1-40)", member="The member to assign", minutes="Duration in minutes (optional)")
-async def slash_b3add(interaction: discord.Interaction, channel: int, member: discord.Member, minutes: int = DEFAULT_MINUTES):
-    if not is_helper(interaction.user):
-        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
-        return
-
-    if channel < 1 or channel > TOTAL_CHANNELS or minutes < 1:
-        await interaction.response.send_message("❌ Invalid channel number or minutes.", ephemeral=True)
-        return
-
-    now = int(time.time())
-    async with data_lock:
-        for c, info in list(channel_data.items()):
-            if info.get("type") == "member" and info["user_id"] == member.id:
-                del channel_data[c]
-
-        channel_data[channel] = {
-            "type": "member",
-            "user_id": member.id,
-            "end_time": now + (minutes * 60),
-            "queue": [],
-        }
-
-    await update_tracker_message()
-    await interaction.response.send_message(f"🛡️ Manually assigned **Ch {channel}** to {member.mention} for **{minutes}m**.", ephemeral=True)
-
-
-@bot.tree.command(name="b3clear", description="Clear a specific B3 channel.")
-@app_commands.describe(channel="Channel number (1-40)")
-async def slash_b3clear(interaction: discord.Interaction, channel: int):
-    if not is_helper(interaction.user):
-        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
-        return
-
-    async with data_lock:
-        existed = channel in channel_data
-        if existed:
-            del channel_data[channel]
-
-    if existed:
-        await update_tracker_message()
-        await interaction.response.send_message(f"🛡️ Cleared **Ch {channel}**.", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"ℹ️ **Ch {channel}** is already unknown.", ephemeral=True)
-
-
-@bot.tree.command(name="b3clearall", description="Reset all B3 channels to unknown.")
-async def slash_b3clearall(interaction: discord.Interaction):
-    if not is_helper(interaction.user):
-        await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
-        return
-
-    async with data_lock:
-        channel_data.clear()
-
-    await update_tracker_message()
-    await interaction.response.send_message("🛡️ All B3 channels reset to unknown.", ephemeral=True)
-
-
-# --- LEGACY TEXT COMMANDS (! PREFIX) ---
-# Note: Text command uses '!postb3' to avoid conflicting with the '/b3' slash command name.
-
-@bot.command(name="postb3")
-async def setup_b3_text(ctx):
-    if not is_helper(ctx.author):
-        try:
-            await ctx.message.delete()
-            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", delete_after=5)
-        except discord.HTTPException:
-            pass
-        return
-
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
-
-    old_ch_id = tracker_message_info.get("channel_id")
-    old_msg_id = tracker_message_info.get("message_id")
-    if old_ch_id and old_msg_id:
-        old_channel = bot.get_channel(old_ch_id)
-        if old_channel:
-            try:
-                old_msg = await old_channel.fetch_message(old_msg_id)
-                await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
-
-    msg = await ctx.send(embed=build_embed(), view=TrackerView(page=1))
-    tracker_message_info["channel_id"] = msg.channel.id
-    tracker_message_info["message_id"] = msg.id
-    global current_page
-    current_page = 1
-    await save_data()
-
-
-@bot.command(name="b3clear")
-async def clear_b3_ch(ctx, ch: int):
-    if not is_helper(ctx.author):
-        return
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
-    async with data_lock:
-        existed = ch in channel_data
-        if existed:
-            del channel_data[ch]
-    if existed:
-        await update_tracker_message()
-        await ctx.send(f"🛡️ Cleared **Ch {ch}**.", delete_after=5)
-    else:
-        await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
-
-
-@bot.command(name="b3clearall")
-async def clear_all_b3(ctx):
-    if not is_helper(ctx.author):
-        return
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
-    async with data_lock:
-        channel_data.clear()
-    await update_tracker_message()
-    await ctx.send("🛡️ All B3 channels reset to unknown.", delete_after=5)
-
-
-@bot.command(name="b3add")
-async def add_b3_member(ctx, ch: int, minutes: int, member: discord.Member):
-    if not is_helper(ctx.author):
-        try:
-            await ctx.message.delete()
-            await ctx.send(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", delete_after=5)
-        except discord.HTTPException:
-            pass
-        return
-
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
-
-    if ch < 1 or ch > TOTAL_CHANNELS or minutes < 1:
-        try:
-            await ctx.send("❌ Invalid channel number or minutes.", delete_after=5)
-        except discord.HTTPException:
-            pass
-        return
-
-    now = int(time.time())
-    async with data_lock:
-        for c, info in list(channel_data.items()):
-            if info.get("type") == "member" and info["user_id"] == member.id:
-                del channel_data[c]
-
-        channel_data[ch] = {
-            "type": "member",
-            "user_id": member.id,
-            "end_time": now + (minutes * 60),
-            "queue": [],
-        }
-
-    await update_tracker_message()
-    try:
-        await ctx.send(f"🛡️ Manually assigned **Ch {ch}** to {member.mention} for **{minutes}m**.", delete_after=5)
-    except discord.HTTPException:
-        pass
-
-
-if __name__ == "__main__":
-    keep_alive()
-    bot.run(BOT_TOKEN)
+                    if info.get("type") == "member":
+                        audit_events.append(f"⏰ **Ch {ch}** (<@{info['user_id']}>) timer expired and reset to unknown.")
+                    else:
+                        nm_name = info.get("name", "Non-Member")
+                        audit_events.append(f"⏰ **Ch {ch}** non-member timer (**{nm_name}**) expired and reset
