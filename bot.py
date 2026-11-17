@@ -60,7 +60,8 @@ async def send_audit_log(text: str):
         if not log_channel:
             log_channel = await bot.fetch_channel(LOG_CHANNEL_ID)
         if log_channel:
-            await log_channel.send(f"[B2] {text}")
+            now_ts = int(time.time())
+            await log_channel.send(f"<t:{now_ts}:T> [B2] {text}")
     except Exception as e:
         print(f"[Audit Log Error]: {e}")
 
