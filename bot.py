@@ -15,21 +15,21 @@ MONGO_URI = os.environ.get("MONGO_URI")
 TEST_GUILD_ID = 1569151015536820224
 TOTAL_CHANNELS = 40
 DEFAULT_MINUTES = 98
-HELPER_ROLE_NAME = "B2 Helper"
+HELPER_ROLE_NAME = "B3 Helper"
 AUTO_DELETE_SECONDS = 5
 # ---------------------
 
 # --- MONGODB SETUP ---
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["b2_subway_db"]
-state_collection = db["board_state"]
+state_collection = db["b3_board_state"]
 
 # --- KEEP-ALIVE WEB SERVER ---
 app = Flask("")
 
 @app.route("/")
 def home():
-    return "B2 Subway Unified Tracker Bot is online with MongoDB!"
+    return "B3 Subway Unified Tracker Bot is online with MongoDB!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -59,7 +59,6 @@ def is_helper(member: discord.Member) -> bool:
 
 async def save_data():
     try:
-        # Convert integer dictionary keys to strings for MongoDB compatibility
         str_channels = {str(k): v for k, v in channel_data.items()}
         await state_collection.update_one(
             {"_id": "state"},
@@ -81,7 +80,6 @@ async def load_data():
     try:
         doc = await state_collection.find_one({"_id": "state"})
         if doc:
-            # Convert string keys back to integers
             raw_channels = doc.get("channels", {})
             channel_data = {int(k): v for k, v in raw_channels.items()}
             tracker_message_info = doc.get(
@@ -105,14 +103,14 @@ def format_duration(minutes: int) -> str:
 def build_embed():
     now = int(time.time())
     embed = discord.Embed(
-        title="🚇 B2 Subway Line — Jr. Wraith Channel Tracker",
+        title="🚇 B3 Subway Line — Jr. Wraith Channel Tracker",
         description=(
             "Use the **Dropdown** to switch channel pages (**1–10**, **11–20**,"
             " **21–30**, **31–40**).\n"
             "🟢 = Member Claimed | 🔴 = Non-Member Timer | 🟠 = Unknown\n"
             "Click a **Channel Button** to claim it as a member, or use **Log Non-Member**!"
         ),
-        color=discord.Color.purple(),
+        color=discord.Color.blue(),
     )
 
     lines_left = []
@@ -826,20 +824,20 @@ async def on_ready():
         guild_obj = discord.Object(id=TEST_GUILD_ID)
         bot.tree.copy_global_to(guild=guild_obj)
         await bot.tree.sync(guild=guild_obj)
-        print(f"Slash commands synced instantly to test guild ID: {TEST_GUILD_ID}")
+        print(f"B3 Slash commands synced instantly to test guild ID: {TEST_GUILD_ID}")
     except Exception as e:
-        print(f"Failed to sync slash commands: {e}")
+        print(f"Failed to sync B3 slash commands: {e}")
 
     if not cleanup_expired.is_running():
         cleanup_expired.start()
-    print(f"Unified Bot logged in as {bot.user} with MongoDB persistence!")
+    print(f"B3 Bot logged in as {bot.user} with MongoDB persistence!")
     await update_tracker_message()
 
 
-# --- SLASH COMMANDS ---
+# --- SLASH COMMANDS (B3) ---
 
-@bot.tree.command(name="b2", description="Post or reset the B2 channel tracker embed.")
-async def slash_b2(interaction: discord.Interaction):
+@bot.tree.command(name="b3", description="Post or reset the B3 channel tracker embed.")
+async def slash_b3(interaction: discord.Interaction):
     if not is_helper(interaction.user):
         await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** or Administrators can post the tracker.", ephemeral=True)
         return
@@ -863,12 +861,12 @@ async def slash_b2(interaction: discord.Interaction):
     global current_page
     current_page = 1
     await save_data()
-    await interaction.followup.send("✅ Tracker posted successfully!", ephemeral=True)
+    await interaction.followup.send("✅ B3 Tracker posted successfully!", ephemeral=True)
 
 
-@bot.tree.command(name="add", description="Manually assign a channel to a member.")
+@bot.tree.command(name="b3add", description="Manually assign a B3 channel to a member.")
 @app_commands.describe(channel="Channel number (1-40)", member="The member to assign", minutes="Duration in minutes (optional)")
-async def slash_add(interaction: discord.Interaction, channel: int, member: discord.Member, minutes: int = DEFAULT_MINUTES):
+async def slash_b3add(interaction: discord.Interaction, channel: int, member: discord.Member, minutes: int = DEFAULT_MINUTES):
     if not is_helper(interaction.user):
         await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
         return
@@ -894,9 +892,9 @@ async def slash_add(interaction: discord.Interaction, channel: int, member: disc
     await interaction.response.send_message(f"🛡️ Manually assigned **Ch {channel}** to {member.mention} for **{minutes}m**.", ephemeral=True)
 
 
-@bot.tree.command(name="clear", description="Clear a specific channel.")
+@bot.tree.command(name="b3clear", description="Clear a specific B3 channel.")
 @app_commands.describe(channel="Channel number (1-40)")
-async def slash_clear(interaction: discord.Interaction, channel: int):
+async def slash_b3clear(interaction: discord.Interaction, channel: int):
     if not is_helper(interaction.user):
         await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
         return
@@ -913,8 +911,8 @@ async def slash_clear(interaction: discord.Interaction, channel: int):
         await interaction.response.send_message(f"ℹ️ **Ch {channel}** is already unknown.", ephemeral=True)
 
 
-@bot.tree.command(name="clearall", description="Reset all channels to unknown.")
-async def slash_clearall(interaction: discord.Interaction):
+@bot.tree.command(name="b3clearall", description="Reset all B3 channels to unknown.")
+async def slash_b3clearall(interaction: discord.Interaction):
     if not is_helper(interaction.user):
         await interaction.response.send_message(f"❌ Only **{HELPER_ROLE_NAME}** can use this command.", ephemeral=True)
         return
@@ -923,13 +921,14 @@ async def slash_clearall(interaction: discord.Interaction):
         channel_data.clear()
 
     await update_tracker_message()
-    await interaction.response.send_message("🛡️ All channels reset to unknown.", ephemeral=True)
+    await interaction.response.send_message("🛡️ All B3 channels reset to unknown.", ephemeral=True)
 
 
-# --- LEGACY TEXT COMMANDS ---
+# --- LEGACY TEXT COMMANDS (! PREFIX) ---
+# Note: Text command uses '!postb3' to avoid conflicting with the '/b3' slash command name.
 
-@bot.command(name="b2")
-async def setup_b2(ctx):
+@bot.command(name="postb3")
+async def setup_b3_text(ctx):
     if not is_helper(ctx.author):
         try:
             await ctx.message.delete()
@@ -938,7 +937,10 @@ async def setup_b2(ctx):
             pass
         return
 
-    await ctx.message.delete()
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
 
     old_ch_id = tracker_message_info.get("channel_id")
     old_msg_id = tracker_message_info.get("message_id")
@@ -959,11 +961,14 @@ async def setup_b2(ctx):
     await save_data()
 
 
-@bot.command()
-async def clear_ch(ctx, ch: int):
+@bot.command(name="b3clear")
+async def clear_b3_ch(ctx, ch: int):
     if not is_helper(ctx.author):
         return
-    await ctx.message.delete()
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
     async with data_lock:
         existed = ch in channel_data
         if existed:
@@ -975,19 +980,22 @@ async def clear_ch(ctx, ch: int):
         await ctx.send(f"ℹ️ **Ch {ch}** is already unknown.", delete_after=5)
 
 
-@bot.command()
-async def clear_all(ctx):
+@bot.command(name="b3clearall")
+async def clear_all_b3(ctx):
     if not is_helper(ctx.author):
         return
-    await ctx.message.delete()
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
     async with data_lock:
         channel_data.clear()
     await update_tracker_message()
-    await ctx.send("🛡️ All channels reset to unknown.", delete_after=5)
+    await ctx.send("🛡️ All B3 channels reset to unknown.", delete_after=5)
 
 
-@bot.command(name="add_member")
-async def add_member(ctx, ch: int, minutes: int, member: discord.Member):
+@bot.command(name="b3add")
+async def add_b3_member(ctx, ch: int, minutes: int, member: discord.Member):
     if not is_helper(ctx.author):
         try:
             await ctx.message.delete()
@@ -996,7 +1004,10 @@ async def add_member(ctx, ch: int, minutes: int, member: discord.Member):
             pass
         return
 
-    await ctx.message.delete()
+    try:
+        await ctx.message.delete()
+    except discord.HTTPException:
+        pass
 
     if ch < 1 or ch > TOTAL_CHANNELS or minutes < 1:
         try:
